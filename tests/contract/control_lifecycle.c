@@ -14,6 +14,12 @@ extern ssu_err_t ssu_controller_release(const ssu_plugin_ops_t *plugin,
                                         const char *allocate_id);
 extern ssu_err_t ssu_controller_query_allocations(ssu_allocation_info_t *out,
                                                   uint32_t *inout_count);
+extern ssu_err_t ssu_controller_mount(const ssu_plugin_ops_t *plugin,
+                                      const ssu_mount_req_t *req);
+extern ssu_err_t ssu_controller_unmount(const ssu_plugin_ops_t *plugin,
+                                        const char *logical_dev);
+extern ssu_err_t ssu_controller_query_logdevs(ssu_logdev_info_t *out,
+                                              uint32_t *inout_count);
 
 static int expect_err(const char *name, ssu_err_t actual, ssu_err_t expected)
 {
@@ -40,6 +46,12 @@ int main(void)
     uint32_t extent_count = 1;
     ssu_allocation_info_t allocations[1];
     uint32_t allocation_count = 1;
+    ssu_mount_req_t mount_req = {
+        .allocate_id = "alloc-0",
+        .host_id = "local",
+    };
+    ssu_logdev_info_t logdevs[1];
+    uint32_t logdev_count = 1;
 
     setenv("SSU_MOCK_SSU_COUNT", "1", 1);
 
@@ -92,6 +104,84 @@ int main(void)
         allocations[0].length != req.size_bytes) {
         fputs("query allocations returned unexpected active allocation\n",
               stderr);
+        return 1;
+    }
+
+    snprintf(mount_req.logical_dev, sizeof(mount_req.logical_dev),
+             "/dev/ssu0");
+    if (expect_err("mount", ssu_controller_mount(plugin, &mount_req),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    memset(logdevs, 0, sizeof(logdevs));
+    if (expect_err("query logdevs",
+                   ssu_controller_query_logdevs(logdevs, &logdev_count),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (logdev_count != 1 ||
+        strcmp(logdevs[0].logical_dev, "/dev/ssu0") != 0 ||
+        strcmp(logdevs[0].allocate_id, "alloc-0") != 0 ||
+        strcmp(logdevs[0].phys_dev, "/dev/nullb0") != 0 ||
+        strcmp(logdevs[0].ns_id, "mock-ns0") != 0 ||
+        logdevs[0].length != req.size_bytes) {
+        fputs("query logdevs returned unexpected mapping\n", stderr);
+        return 1;
+    }
+
+    allocation_count = 1;
+    memset(allocations, 0, sizeof(allocations));
+    if (expect_err("query allocations after mount",
+                   ssu_controller_query_allocations(allocations,
+                                                    &allocation_count),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (allocation_count != 1 ||
+        strcmp(allocations[0].state, "MOUNTED") != 0) {
+        fputs("mount should mark allocation MOUNTED\n", stderr);
+        return 1;
+    }
+
+    if (expect_err("release mounted allocation",
+                   ssu_controller_release(plugin, "alloc-0"),
+                   SSU_ERR_BUSY) != 0) {
+        return 1;
+    }
+
+    if (expect_err("unmount", ssu_controller_unmount(plugin, "/dev/ssu0"),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    logdev_count = 1;
+    memset(logdevs, 0, sizeof(logdevs));
+    if (expect_err("query logdevs after unmount",
+                   ssu_controller_query_logdevs(logdevs, &logdev_count),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (logdev_count != 0) {
+        fputs("unmount should remove logdev mapping\n", stderr);
+        return 1;
+    }
+
+    allocation_count = 1;
+    memset(allocations, 0, sizeof(allocations));
+    if (expect_err("query allocations after unmount",
+                   ssu_controller_query_allocations(allocations,
+                                                    &allocation_count),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (allocation_count != 1 ||
+        strcmp(allocations[0].state, "ACTIVE") != 0) {
+        fputs("unmount should keep allocation ACTIVE\n", stderr);
         return 1;
     }
 

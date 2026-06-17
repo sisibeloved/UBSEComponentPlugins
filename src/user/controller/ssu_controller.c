@@ -6,6 +6,7 @@
 #define SSU_CONTROLLER_MAX_RESOURCES 128U
 #define SSU_CONTROLLER_MAX_ALLOCATIONS 128U
 #define SSU_CONTROLLER_MAX_RELEASED 128U
+#define SSU_CONTROLLER_MAX_LOGDEVS 128U
 
 static ssu_resource_info_t pool[SSU_CONTROLLER_MAX_RESOURCES];
 static uint32_t pool_count;
@@ -16,7 +17,13 @@ typedef struct {
     ssu_allocation_info_t info;
 } controller_allocation_t;
 
+typedef struct {
+    int active;
+    ssu_logdev_info_t info;
+} controller_logdev_t;
+
 static controller_allocation_t allocations[SSU_CONTROLLER_MAX_ALLOCATIONS];
+static controller_logdev_t logdevs[SSU_CONTROLLER_MAX_LOGDEVS];
 static char released_ids[SSU_CONTROLLER_MAX_RELEASED][64];
 static uint32_t released_count;
 
@@ -46,6 +53,67 @@ static uint32_t active_allocation_count(void)
     }
 
     return count;
+}
+
+static uint32_t active_logdev_count(void)
+{
+    uint32_t count = 0;
+    uint32_t i;
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_LOGDEVS; i++) {
+        if (logdevs[i].active) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+static int is_empty_string(const char *s)
+{
+    return s == NULL || s[0] == '\0';
+}
+
+static controller_allocation_t *find_allocation(const char *allocate_id)
+{
+    uint32_t i;
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
+        if (allocations[i].active &&
+            strcmp(allocations[i].info.allocate_id, allocate_id) == 0) {
+            return &allocations[i];
+        }
+    }
+
+    return NULL;
+}
+
+static controller_logdev_t *find_logdev_by_dev(const char *logical_dev)
+{
+    uint32_t i;
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_LOGDEVS; i++) {
+        if (logdevs[i].active &&
+            strcmp(logdevs[i].info.logical_dev, logical_dev) == 0) {
+            return &logdevs[i];
+        }
+    }
+
+    return NULL;
+}
+
+static int allocation_has_logdev(const char *allocate_id)
+{
+    uint32_t i;
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_LOGDEVS; i++) {
+        if (logdevs[i].active &&
+            strcmp(logdevs[i].info.allocate_id, allocate_id) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 static int released_id_exists(const char *allocate_id)
@@ -287,6 +355,10 @@ ssu_err_t ssu_controller_release(const ssu_plugin_ops_t *plugin,
         return SSU_ERR_INVALID;
     }
 
+    if (allocation_has_logdev(allocate_id)) {
+        return SSU_ERR_BUSY;
+    }
+
     for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
         if (allocations[i].active &&
             strcmp(allocations[i].info.allocate_id, allocate_id) == 0) {
@@ -329,6 +401,134 @@ ssu_err_t ssu_controller_query_allocations(ssu_allocation_info_t *out,
     for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
         if (allocations[i].active) {
             out[written] = allocations[i].info;
+            written++;
+        }
+    }
+
+    *inout_count = written;
+    return SSU_OK;
+}
+
+ssu_err_t ssu_controller_mount(const ssu_plugin_ops_t *plugin,
+                               const ssu_mount_req_t *req)
+{
+    controller_allocation_t *allocation;
+    controller_logdev_t *slot = NULL;
+    char phys_dev[64];
+    ssu_err_t err;
+    uint32_t i;
+
+    if (plugin == NULL || plugin->mount == NULL || plugin->connect == NULL ||
+        req == NULL || is_empty_string(req->allocate_id) ||
+        is_empty_string(req->host_id) ||
+        is_empty_string(req->logical_dev)) {
+        return SSU_ERR_INVALID;
+    }
+
+    allocation = find_allocation(req->allocate_id);
+    if (allocation == NULL) {
+        return SSU_ERR_NOT_FOUND;
+    }
+
+    if (find_logdev_by_dev(req->logical_dev) != NULL ||
+        allocation_has_logdev(req->allocate_id)) {
+        return SSU_ERR_BUSY;
+    }
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_LOGDEVS; i++) {
+        if (!logdevs[i].active) {
+            slot = &logdevs[i];
+            break;
+        }
+    }
+
+    if (slot == NULL) {
+        return SSU_ERR_NO_RESOURCE;
+    }
+
+    memset(phys_dev, 0, sizeof(phys_dev));
+    err = plugin->connect(allocation->info.ssu_id, phys_dev,
+                          sizeof(phys_dev));
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    err = plugin->mount(req->allocate_id, req->host_id, req->logical_dev);
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    memset(slot, 0, sizeof(*slot));
+    slot->active = 1;
+    copy_cstr(slot->info.logical_dev, sizeof(slot->info.logical_dev),
+              req->logical_dev);
+    copy_cstr(slot->info.host_id, sizeof(slot->info.host_id), req->host_id);
+    copy_cstr(slot->info.allocate_id, sizeof(slot->info.allocate_id),
+              req->allocate_id);
+    slot->info.logical_offset = allocation->info.logical_offset;
+    slot->info.length = allocation->info.length;
+    copy_cstr(slot->info.phys_dev, sizeof(slot->info.phys_dev), phys_dev);
+    copy_cstr(slot->info.ns_id, sizeof(slot->info.ns_id),
+              allocation->info.ns_id);
+    slot->info.phys_sector = allocation->info.phys_sector;
+    copy_cstr(allocation->info.state, sizeof(allocation->info.state),
+              "MOUNTED");
+
+    return SSU_OK;
+}
+
+ssu_err_t ssu_controller_unmount(const ssu_plugin_ops_t *plugin,
+                                 const char *logical_dev)
+{
+    controller_logdev_t *logdev;
+    controller_allocation_t *allocation;
+    ssu_err_t err;
+
+    if (plugin == NULL || plugin->unmount == NULL ||
+        is_empty_string(logical_dev)) {
+        return SSU_ERR_INVALID;
+    }
+
+    logdev = find_logdev_by_dev(logical_dev);
+    if (logdev == NULL) {
+        return SSU_ERR_NOT_FOUND;
+    }
+
+    err = plugin->unmount(logical_dev);
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    allocation = find_allocation(logdev->info.allocate_id);
+    if (allocation != NULL) {
+        copy_cstr(allocation->info.state, sizeof(allocation->info.state),
+                  "ACTIVE");
+    }
+
+    memset(logdev, 0, sizeof(*logdev));
+    return SSU_OK;
+}
+
+ssu_err_t ssu_controller_query_logdevs(ssu_logdev_info_t *out,
+                                       uint32_t *inout_count)
+{
+    uint32_t needed;
+    uint32_t written = 0;
+    uint32_t i;
+
+    if (inout_count == NULL) {
+        return SSU_ERR_INVALID;
+    }
+
+    needed = active_logdev_count();
+    if (out == NULL || *inout_count < needed) {
+        *inout_count = needed;
+        return needed == 0 ? SSU_OK : SSU_ERR_BUFFER_TOO_SMALL;
+    }
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_LOGDEVS; i++) {
+        if (logdevs[i].active) {
+            out[written] = logdevs[i].info;
             written++;
         }
     }

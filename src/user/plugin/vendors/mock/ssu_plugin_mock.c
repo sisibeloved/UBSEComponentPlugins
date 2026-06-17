@@ -9,6 +9,29 @@
 
 #define MOCK_TOTAL_BYTES (1ULL << 30)
 #define MOCK_MAX_NULLBLK 128U
+#define MOCK_MAX_NAMESPACES 128U
+#define MOCK_MAX_MOUNTS 128U
+
+typedef struct {
+    int active;
+    char allocate_id[64];
+    char ssu_id[64];
+    char ns_id[32];
+    uint64_t logical_offset;
+    uint64_t length;
+    uint64_t phys_sector;
+} mock_namespace_t;
+
+typedef struct {
+    int active;
+    char allocate_id[64];
+    char host_id[64];
+    char logical_dev[64];
+} mock_mount_t;
+
+static mock_namespace_t namespaces[MOCK_MAX_NAMESPACES];
+static mock_mount_t mounts[MOCK_MAX_MOUNTS];
+static uint64_t next_ns_id;
 
 static int parse_uint32_tail(const char *s, uint32_t *out)
 {
@@ -96,6 +119,63 @@ static void fill_resource(ssu_resource_info_t *resource, uint32_t index,
     resource->total_bytes = total_bytes;
     resource->used_bytes = 0;
     snprintf(resource->state, sizeof(resource->state), "%s", state);
+}
+
+static void copy_cstr(char *dst, size_t n, const char *src)
+{
+    if (n == 0) {
+        return;
+    }
+
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+
+    snprintf(dst, n, "%s", src);
+}
+
+static mock_namespace_t *find_namespace_by_allocate(const char *allocate_id)
+{
+    uint32_t i;
+
+    for (i = 0; i < MOCK_MAX_NAMESPACES; i++) {
+        if (namespaces[i].active &&
+            strcmp(namespaces[i].allocate_id, allocate_id) == 0) {
+            return &namespaces[i];
+        }
+    }
+
+    return NULL;
+}
+
+static mock_namespace_t *find_namespace(const char *ssu_id, const char *ns_id)
+{
+    uint32_t i;
+
+    for (i = 0; i < MOCK_MAX_NAMESPACES; i++) {
+        if (namespaces[i].active &&
+            strcmp(namespaces[i].ssu_id, ssu_id) == 0 &&
+            strcmp(namespaces[i].ns_id, ns_id) == 0) {
+            return &namespaces[i];
+        }
+    }
+
+    return NULL;
+}
+
+static mock_mount_t *find_mount(const char *logical_dev)
+{
+    uint32_t i;
+
+    for (i = 0; i < MOCK_MAX_MOUNTS; i++) {
+        if (mounts[i].active &&
+            strcmp(mounts[i].logical_dev, logical_dev) == 0) {
+            return &mounts[i];
+        }
+    }
+
+    return NULL;
 }
 
 static void insert_index(uint32_t *indexes, uint32_t *count, uint32_t index)
@@ -279,8 +359,12 @@ static ssu_err_t mock_create_ns(const ssu_extent_create_req_t *extent_req,
                                 char *out_ns_id, size_t n,
                                 uint64_t *out_phys_sector)
 {
+    mock_namespace_t *slot = NULL;
+    uint32_t i;
+
     if (extent_req == NULL || out_ns_id == NULL || n == 0 ||
-        out_phys_sector == NULL) {
+        out_phys_sector == NULL || extent_req->allocate_id == NULL ||
+        extent_req->ssu_id == NULL) {
         return SSU_ERR_INVALID;
     }
 
@@ -288,36 +372,106 @@ static ssu_err_t mock_create_ns(const ssu_extent_create_req_t *extent_req,
         return SSU_ERR_UNSUPPORTED;
     }
 
-    snprintf(out_ns_id, n, "mock-ns0");
+    if (find_namespace_by_allocate(extent_req->allocate_id) != NULL) {
+        return SSU_ERR_NS_EXISTS;
+    }
+
+    for (i = 0; i < MOCK_MAX_NAMESPACES; i++) {
+        if (!namespaces[i].active) {
+            slot = &namespaces[i];
+            break;
+        }
+    }
+
+    if (slot == NULL) {
+        return SSU_ERR_NO_RESOURCE;
+    }
+
+    memset(slot, 0, sizeof(*slot));
+    slot->active = 1;
+    copy_cstr(slot->allocate_id, sizeof(slot->allocate_id),
+              extent_req->allocate_id);
+    copy_cstr(slot->ssu_id, sizeof(slot->ssu_id), extent_req->ssu_id);
+    snprintf(slot->ns_id, sizeof(slot->ns_id), "mock-ns%llu",
+             (unsigned long long)next_ns_id);
+    slot->logical_offset = extent_req->logical_offset;
+    slot->length = extent_req->length;
+    slot->phys_sector = extent_req->phys_offset_hint;
+    next_ns_id++;
+
+    snprintf(out_ns_id, n, "%s", slot->ns_id);
     *out_phys_sector = extent_req->phys_offset_hint;
     return SSU_OK;
 }
 
 static ssu_err_t mock_delete_ns(const char *ssu_id, const char *ns_id)
 {
+    mock_namespace_t *ns;
+
     if (ssu_id == NULL || ns_id == NULL) {
         return SSU_ERR_INVALID;
     }
 
+    ns = find_namespace(ssu_id, ns_id);
+    if (ns == NULL) {
+        return SSU_ERR_NOT_FOUND;
+    }
+
+    memset(ns, 0, sizeof(*ns));
     return SSU_OK;
 }
 
 static ssu_err_t mock_mount(const char *allocate_id, const char *host_id,
                             const char *logical_dev)
 {
+    mock_mount_t *slot = NULL;
+    uint32_t i;
+
     if (allocate_id == NULL || host_id == NULL || logical_dev == NULL) {
         return SSU_ERR_INVALID;
     }
 
+    if (find_namespace_by_allocate(allocate_id) == NULL) {
+        return SSU_ERR_NOT_FOUND;
+    }
+
+    if (find_mount(logical_dev) != NULL) {
+        return SSU_ERR_BUSY;
+    }
+
+    for (i = 0; i < MOCK_MAX_MOUNTS; i++) {
+        if (!mounts[i].active) {
+            slot = &mounts[i];
+            break;
+        }
+    }
+
+    if (slot == NULL) {
+        return SSU_ERR_NO_RESOURCE;
+    }
+
+    memset(slot, 0, sizeof(*slot));
+    slot->active = 1;
+    copy_cstr(slot->allocate_id, sizeof(slot->allocate_id), allocate_id);
+    copy_cstr(slot->host_id, sizeof(slot->host_id), host_id);
+    copy_cstr(slot->logical_dev, sizeof(slot->logical_dev), logical_dev);
     return SSU_OK;
 }
 
 static ssu_err_t mock_unmount(const char *logical_dev)
 {
+    mock_mount_t *mount;
+
     if (logical_dev == NULL) {
         return SSU_ERR_INVALID;
     }
 
+    mount = find_mount(logical_dev);
+    if (mount == NULL) {
+        return SSU_ERR_NOT_FOUND;
+    }
+
+    memset(mount, 0, sizeof(*mount));
     return SSU_OK;
 }
 

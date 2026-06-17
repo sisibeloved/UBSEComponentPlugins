@@ -1,6 +1,7 @@
 #include "ssu_api.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 static int expect_err(const char *name, ssu_err_t actual, ssu_err_t expected)
@@ -28,7 +29,7 @@ static int test_reliability_gate(ssu_reliability_t reliability)
                       SSU_ERR_UNSUPPORTED);
 }
 
-static int test_stripe_stub_success(void)
+static int test_stripe_alloc_success(void)
 {
     ssu_alloc_req_t req = {
         .size_bytes = 4096,
@@ -37,15 +38,24 @@ static int test_stripe_stub_success(void)
         .map_dir = SSU_MAP_DIR_FORWARD,
     };
     ssu_alloc_result_t out;
-    ssu_err_t err = ssu_resource_alloc(&req, &out, NULL, NULL);
+    ssu_alloc_extent_t extents[1];
+    uint32_t extent_count = 1;
+    ssu_err_t err;
+
+    setenv("SSU_MOCK_SSU_COUNT", "1", 1);
+
+    err = ssu_resource_alloc(&req, &out, extents, &extent_count);
 
     if (expect_err("stripe alloc", err, SSU_OK) != 0) {
         return 1;
     }
 
-    if (strcmp(out.allocate_id, "stub-alloc-0") != 0 ||
-        out.logical_size_bytes != req.size_bytes) {
-        fprintf(stderr, "stripe alloc returned unexpected stub result\n");
+    if (strcmp(out.allocate_id, "alloc-0") != 0 ||
+        out.logical_size_bytes != req.size_bytes ||
+        out.extent_count != 1 ||
+        extent_count != 1 ||
+        strcmp(extents[0].ssu_id, "mock-ssu0") != 0) {
+        fprintf(stderr, "stripe alloc returned unexpected MVP-2 result\n");
         return 1;
     }
 
@@ -75,7 +85,7 @@ int main(void)
         return 1;
     }
 
-    if (test_stripe_stub_success() != 0) {
+    if (test_stripe_alloc_success() != 0) {
         return 1;
     }
 

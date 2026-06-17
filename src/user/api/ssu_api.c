@@ -1,5 +1,6 @@
 #include "ssu_api.h"
 #include "ssu_controller.h"
+#include "ssu_plugin.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -23,12 +24,30 @@ static size_t query_elem_size(ssu_query_type_t type)
     }
 }
 
+static const ssu_plugin_ops_t *default_plugin(void)
+{
+    return ssu_plugin_entry();
+}
+
+static ssu_err_t refresh_default_pool(void)
+{
+    const ssu_plugin_ops_t *plugin = default_plugin();
+
+    if (plugin == NULL) {
+        return SSU_ERR_INTERNAL;
+    }
+
+    return ssu_controller_refresh_pool(plugin);
+}
+
 ssu_err_t ssu_resource_alloc(const ssu_alloc_req_t *req,
                              ssu_alloc_result_t *out,
                              ssu_alloc_extent_t *out_extents,
                              uint32_t *inout_extent_count)
 {
-    (void)out_extents;
+    ssu_alloc_extent_t tmp_extents[1];
+    uint32_t tmp_extent_count = 1;
+    ssu_err_t err;
 
     if (req == NULL || out == NULL) {
         return SSU_ERR_INVALID;
@@ -42,16 +61,18 @@ ssu_err_t ssu_resource_alloc(const ssu_alloc_req_t *req,
         return SSU_ERR_INVALID;
     }
 
-    memset(out, 0, sizeof(*out));
-    snprintf(out->allocate_id, sizeof(out->allocate_id), "stub-alloc-0");
-    out->logical_size_bytes = req->size_bytes;
-    out->extent_count = 0;
-
-    if (inout_extent_count != NULL) {
-        *inout_extent_count = 0;
+    err = refresh_default_pool();
+    if (err != SSU_OK) {
+        return err;
     }
 
-    return SSU_OK;
+    if (out_extents == NULL && inout_extent_count == NULL) {
+        out_extents = tmp_extents;
+        inout_extent_count = &tmp_extent_count;
+    }
+
+    return ssu_controller_alloc(default_plugin(), req, out, out_extents,
+                                inout_extent_count);
 }
 
 ssu_err_t ssu_resource_mount(const ssu_mount_req_t *req)
@@ -61,7 +82,7 @@ ssu_err_t ssu_resource_mount(const ssu_mount_req_t *req)
         return SSU_ERR_INVALID;
     }
 
-    return SSU_OK;
+    return ssu_controller_mount(default_plugin(), req);
 }
 
 ssu_err_t ssu_resource_unmount(const char *logical_dev)
@@ -70,7 +91,7 @@ ssu_err_t ssu_resource_unmount(const char *logical_dev)
         return SSU_ERR_INVALID;
     }
 
-    return SSU_OK;
+    return ssu_controller_unmount(default_plugin(), logical_dev);
 }
 
 ssu_err_t ssu_resource_release(const char *allocate_id)
@@ -79,7 +100,7 @@ ssu_err_t ssu_resource_release(const char *allocate_id)
         return SSU_ERR_INVALID;
     }
 
-    return SSU_OK;
+    return ssu_controller_release(default_plugin(), allocate_id);
 }
 
 ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
@@ -99,6 +120,11 @@ ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
     }
 
     if (req->type == SSU_QUERY_POOL) {
+        ssu_err_t err = refresh_default_pool();
+        if (err != SSU_OK) {
+            return err;
+        }
+
         return ssu_controller_query_pool((ssu_resource_info_t *)out_array,
                                          inout_count);
     }
@@ -108,9 +134,9 @@ ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
             (ssu_allocation_info_t *)out_array, inout_count);
     }
 
-    if (out_array == NULL || *inout_count == 0) {
-        *inout_count = 0;
-        return SSU_OK;
+    if (req->type == SSU_QUERY_LOGDEV) {
+        return ssu_controller_query_logdevs((ssu_logdev_info_t *)out_array,
+                                            inout_count);
     }
 
     *inout_count = 0;

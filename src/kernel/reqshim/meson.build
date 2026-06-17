@@ -6,7 +6,11 @@ endif
 reqshim_inputs = files(
   'Kbuild',
   'Makefile',
+  'reqshim_blk.c',
+  'reqshim_ioctl.c',
+  'reqshim_internal.h',
   'reqshim_main.c',
+  'reqshim_map.c',
   'reqshim_uapi.h',
 )
 

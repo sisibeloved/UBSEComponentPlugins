@@ -31,3 +31,14 @@ control_lifecycle = executable(
 )
 
 test('control_lifecycle', control_lifecycle)
+
+api_lifecycle = executable(
+  'api_lifecycle',
+  sources: ['api_lifecycle.c'],
+  include_directories: inc,
+  dependencies: [
+    ssu_api_dep,
+  ],
+)
+
+test('api_lifecycle', api_lifecycle)

@@ -1,30 +1,11 @@
-#include <linux/copy_to_user.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/miscdevice.h>
 #include <linux/module.h>
 
-#include "reqshim_uapi.h"
+#include "reqshim_internal.h"
 
 #define SSU_REQSHIM_DEVICE_NAME "ssu-ctl"
-
-static long ssu_reqshim_ioctl(struct file *file, unsigned int cmd,
-                              unsigned long arg)
-{
-    __u32 version = SSU_REQSHIM_UAPI_VERSION;
-
-    (void)file;
-
-    switch (cmd) {
-    case SSU_IOC_GET_VERSION:
-        if (copy_to_user((void __user *)arg, &version, sizeof(version))) {
-            return -EFAULT;
-        }
-        return 0;
-    default:
-        return -ENOTTY;
-    }
-}
 
 static const struct file_operations ssu_reqshim_fops = {
     .owner = THIS_MODULE,
@@ -55,5 +36,5 @@ module_init(ssu_reqshim_init);
 module_exit(ssu_reqshim_exit);
 
 MODULE_AUTHOR("UBSEComponentPlugins");
-MODULE_DESCRIPTION("SSU ReqShim skeleton");
+MODULE_DESCRIPTION("SSU ReqShim control plane");
 MODULE_LICENSE("GPL");
