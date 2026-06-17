@@ -1,3 +1,5 @@
 subdir('contract')
 subdir('mvp1')
 subdir('mvp2')
+subdir('stubs')
+subdir('mvp3')

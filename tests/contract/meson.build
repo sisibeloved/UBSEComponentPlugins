@@ -42,3 +42,15 @@ api_lifecycle = executable(
 )
 
 test('api_lifecycle', api_lifecycle)
+
+dataplane_mock = executable(
+  'dataplane_mock',
+  sources: ['dataplane_mock.c'],
+  include_directories: inc,
+  dependencies: [
+    ssu_headers_dep,
+    ssu_dataplane_dep,
+  ],
+)
+
+test('dataplane_mock', dataplane_mock)

@@ -2,6 +2,7 @@
 
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -81,6 +82,46 @@ static int nullblk_exists(uint32_t index)
 
     snprintf(path, sizeof(path), "/sys/block/nullb%u", index);
     return access(path, F_OK) == 0;
+}
+
+static ssu_err_t mock_backend_file(uint32_t index, char *out_devname,
+                                   size_t n)
+{
+    const char *backend_dir = getenv("SSU_MOCK_BACKEND_DIR");
+    char path[256];
+    int rc;
+    int fd;
+
+    if (backend_dir == NULL || backend_dir[0] == '\0') {
+        return SSU_ERR_NOT_FOUND;
+    }
+
+    rc = snprintf(path, sizeof(path), "%s/mock-ssu%u.img", backend_dir,
+                  index);
+    if (rc < 0 || (size_t)rc >= sizeof(path)) {
+        return SSU_ERR_INVALID;
+    }
+    if ((size_t)rc >= n) {
+        return SSU_ERR_INVALID;
+    }
+
+    fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) {
+        return SSU_ERR_IO;
+    }
+
+    if (ftruncate(fd, (off_t)MOCK_TOTAL_BYTES) != 0) {
+        close(fd);
+        return SSU_ERR_IO;
+    }
+    close(fd);
+
+    rc = snprintf(out_devname, n, "%s", path);
+    if (rc < 0 || (size_t)rc >= n) {
+        return SSU_ERR_INVALID;
+    }
+
+    return SSU_OK;
 }
 
 static uint64_t nullblk_total_bytes(uint32_t index)
@@ -307,6 +348,7 @@ static ssu_err_t mock_connect(const char *ssu_id, char *out_devname, size_t n)
     uint32_t index;
     uint32_t count = 0;
     int configured;
+    ssu_err_t err;
 
     if (ssu_id == NULL || out_devname == NULL || n == 0) {
         return SSU_ERR_INVALID;
@@ -324,6 +366,11 @@ static ssu_err_t mock_connect(const char *ssu_id, char *out_devname, size_t n)
     if ((configured > 0 && index >= count) ||
         (configured == 0 && !nullblk_exists(index))) {
         return SSU_ERR_NOT_FOUND;
+    }
+
+    err = mock_backend_file(index, out_devname, n);
+    if (err != SSU_ERR_NOT_FOUND) {
+        return err;
     }
 
     snprintf(out_devname, n, "/dev/nullb%u", index);

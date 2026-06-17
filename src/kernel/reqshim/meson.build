@@ -7,10 +7,12 @@ reqshim_inputs = files(
   'Kbuild',
   'Makefile',
   'reqshim_blk.c',
+  'reqshim_cmd.c',
   'reqshim_ioctl.c',
   'reqshim_internal.h',
   'reqshim_main.c',
   'reqshim_map.c',
+  'reqshim_phys.c',
   'reqshim_uapi.h',
 )
 

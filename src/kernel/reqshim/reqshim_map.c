@@ -15,10 +15,12 @@ static struct reqshim_map_slot maps[SSU_REQSHIM_MAX_MAPS];
 static bool map_matches_query(const struct ssu_map_entry *entry,
                               const struct ssu_map_query *query)
 {
-    return entry->logical_minor == query->logical_minor &&
-           query->logical_sector >= entry->logical_sector &&
-           query->logical_sector <
-               entry->logical_sector + entry->length_sectors;
+    if (entry->logical_minor != query->logical_minor ||
+        query->logical_sector < entry->logical_sector)
+        return false;
+
+    return query->logical_sector - entry->logical_sector <
+           entry->length_sectors;
 }
 
 int ssu_reqshim_map_add(const struct ssu_map_entry *entry)
