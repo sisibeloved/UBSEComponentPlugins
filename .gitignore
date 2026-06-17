@@ -1,0 +1,188 @@
+# =============================================================================
+# .gitignore — UBSEComponentPlugins
+# 技术栈：C/C++（用户态库 + CLI）、Meson + Ninja、Linux 内核模块（.ko/Kbuild）、
+#         NVMe/UB 内核开发、Protobuf。
+# 参考：github/gitignore 的 C++.gitignore、Linux.gitignore、Global/ + JetBrains + VSCode。
+# =============================================================================
+
+
+# ---------- 构建产物（Meson + Ninja + 内核 Kbuild）----------
+# Meson：构建目录约定为 build/ build-*/
+build/
+[Bb]uild/
+[Bb]uild-*/
+# Ninja
+*.ninja
+.ninja_deps
+.ninja_log
+# Meson 内部状态
+meson-private/
+meson-info/
+meson-logs/
+# Meson 生成的 IDE 工程文件（导入用，不入库）
+/.vscode/
+/.idea/                  # 见下方 IDE 段，此处保留一致性
+compile_commands.json   # 编译数据库；如需入库可注释掉此行
+
+# ---------- 内核模块构建产物（.ko / Kbuild / out-of-tree）----------
+*.mod
+*.mod.c
+*.mod.o
+*.o
+*.o.d
+*.o.cmd
+*.ko
+*.ko.cmd
+*.symvers
+*.order
+*.builtin
+modules.order
+modules.builtin
+modules.builtin.modinfo
+Module.symvers
+.tmp_versions/
+.*.cmd
+# 内核模块 make 的输出目录（M=）
+out/
+[Bb]uild-kernel/
+
+
+# ---------- C/C++ 编译产物与对象 ----------
+*.obj
+*.exe
+*.out
+*.app
+# 静态/动态库（本项目的交付物，不入库）
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.lib
+
+
+# ---------- 预处理 / 汇编 / 调试 ----------
+*.i
+*.ii
+*.s
+*.S
+*.pre
+*.lst
+
+
+# ---------- 链接 / 性能分析 ----------
+*.map
+*.stackdump
+*.gcda
+*.gcno
+*.gcov
+*.dwarf
+*.debug
+
+
+# ---------- 测试 / 覆盖率 ----------
+*.gcda
+*.gcno
+lcov-out/
+coverage/
+coverage.info
+coverage.xml
+*.tap
+test-results/
+/**/*.log
+
+
+# ---------- 依赖 / 包管理 ----------
+# Meson/Ninja 无 lock；vcpkg/conan（若启用）
+vcpkg_installed/
+conan.lock
+conanbuildinfo.txt
+conanfile.lock
+
+
+# ---------- 文档生成 ----------
+_doxy/
+html/
+latex/
+*.aux
+*.toc
+*.pdf   # 注意：若 docs/ 下有需入库的 PDF 设计文档，请缩小范围，勿用通配
+
+
+# ---------- 编辑器 / IDE ----------
+# JetBrains（IntelliJ, CLion, PyCharm …）
+.idea/
+*.iml
+*.ipr
+*.iws
+# VS Code
+.vscode/
+*.code-workspace
+!.vscode/settings.json   # 如希望共享 settings，可放开
+# Visual Studio
+.vs/
+*.vcxproj.user
+*.suo
+*.user
+# Vim
+*.swp
+*.swo
+*~
+[._]*.s[a-v][a-z]
+[._]*.un~
+Session.vim
+.netrwhist
+# Emacs
+\#*\#
+/.emacs.desktop
+*.elc
+# Sublime
+*.sublime-workspace
+*.sublime-project
+
+
+# ---------- 操作系统垃圾文件 ----------
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+
+
+# ---------- 运行期 / 本地配置 / 临时 ----------
+*.tmp
+*.temp
+*.log
+*.pid
+*.lock
+!meson.lock              # 若用 Meson wrap lock，则需入库；此处按现状不放行
+.env
+.env.local
+*.local.conf
+ssu.local.conf
+
+
+# ---------- 内核 / 开发环境运行残留 ----------
+# modprobe/insmod 调试时本地拷贝、内核日志
+dmesg*.log
+*.dmesg
+# 本地加载的模块副本（勿入库）
+/*.ko
+
+
+# ---------- Protobuf 生成代码（除非选择入库）----------
+# 默认忽略 *_pb2.py / *.pb.cc / *.pb.h；如需入库生成产物，注释本段
+*.pb.cc
+*.pb.h
+*_pb2.py
+*_pb2.pyi
