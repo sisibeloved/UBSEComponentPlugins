@@ -43,6 +43,17 @@ api_lifecycle = executable(
 
 test('api_lifecycle', api_lifecycle)
 
+api_extent_buffer = executable(
+  'api_extent_buffer',
+  sources: ['api_extent_buffer.c'],
+  include_directories: inc,
+  dependencies: [
+    ssu_api_dep,
+  ],
+)
+
+test('api_extent_buffer', api_extent_buffer)
+
 dataplane_mock = executable(
   'dataplane_mock',
   sources: ['dataplane_mock.c'],

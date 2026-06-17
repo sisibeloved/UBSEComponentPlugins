@@ -1,3 +1,4 @@
+#include "ssu_api.h"
 #include "ssu_dataplane.h"
 
 #include <errno.h>
@@ -10,6 +11,21 @@
 #include <unistd.h>
 
 #define RESPONSE_SIZE 8192U
+
+typedef struct {
+    const char *logical_dev;
+    const char *host_id;
+    uint64_t alloc_size;
+    uint64_t bytes;
+    int bytes_set;
+    int use_sdk;
+    int do_alloc;
+    int do_mount;
+    int do_io;
+    int do_unmount;
+    int do_release;
+    ssu_reliability_t reliability;
+} smoke_options_t;
 
 static int send_all(int fd, const char *buf, size_t n)
 {
@@ -97,7 +113,7 @@ static int manager_request(const char *command, char *response, size_t n)
     return 1;
 }
 
-static int find_logdev(const char *logical_dev, ssu_logdev_info_t *out)
+static int find_logdev_manager(const char *logical_dev, ssu_logdev_info_t *out)
 {
     char response[RESPONSE_SIZE];
     char *line;
@@ -144,6 +160,52 @@ static int find_logdev(const char *logical_dev, ssu_logdev_info_t *out)
     return 0;
 }
 
+static int find_logdev_sdk(const char *logical_dev, ssu_logdev_info_t *out)
+{
+    ssu_query_req_t req = {
+        .type = SSU_QUERY_LOGDEV,
+        .logical_dev = logical_dev,
+    };
+    ssu_logdev_info_t *logdevs;
+    uint32_t count = 0;
+    uint32_t i;
+    ssu_err_t err;
+
+    err = ssu_resource_query(&req, NULL, sizeof(ssu_logdev_info_t), &count);
+    if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
+        fprintf(stderr, "query logdev failed: %d\n", err);
+        return 0;
+    }
+
+    if (count == 0) {
+        return 0;
+    }
+
+    logdevs = calloc(count, sizeof(*logdevs));
+    if (logdevs == NULL) {
+        fputs("out of memory\n", stderr);
+        return 0;
+    }
+
+    err = ssu_resource_query(&req, logdevs, sizeof(*logdevs), &count);
+    if (err != SSU_OK) {
+        fprintf(stderr, "query logdev failed: %d\n", err);
+        free(logdevs);
+        return 0;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (strcmp(logdevs[i].logical_dev, logical_dev) == 0) {
+            *out = logdevs[i];
+            free(logdevs);
+            return 1;
+        }
+    }
+
+    free(logdevs);
+    return 0;
+}
+
 static void fill_pattern(unsigned char *buf, size_t n)
 {
     size_t i;
@@ -153,50 +215,14 @@ static void fill_pattern(unsigned char *buf, size_t n)
     }
 }
 
-int main(int argc, char **argv)
+static int run_pattern_io(const ssu_logdev_info_t *logdev, uint64_t bytes)
 {
-    const char *logical_dev = NULL;
-    uint64_t bytes = 65536;
-    ssu_logdev_info_t logdev;
     unsigned char *pattern;
     unsigned char *readback;
-    int i;
     int rc = 1;
 
-    for (i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--dev") == 0 && i + 1 < argc) {
-            logical_dev = argv[++i];
-            continue;
-        }
-
-        if (strcmp(argv[i], "--bytes") == 0 && i + 1 < argc) {
-            bytes = (uint64_t)strtoull(argv[++i], NULL, 10);
-            continue;
-        }
-
-        if (logical_dev == NULL) {
-            logical_dev = argv[i];
-            continue;
-        }
-
-        fprintf(stderr,
-                "usage: ssu_smoke /dev/ssuN [--bytes N]\n");
-        return 1;
-    }
-
-    if (logical_dev == NULL || bytes == 0 || bytes > (1ULL << 20)) {
-        fprintf(stderr, "invalid smoke parameters\n");
-        return 1;
-    }
-
-    memset(&logdev, 0, sizeof(logdev));
-    if (!find_logdev(logical_dev, &logdev)) {
-        fprintf(stderr, "logdev not found: %s\n", logical_dev);
-        return 1;
-    }
-
-    if (bytes > logdev.length) {
-        fprintf(stderr, "smoke length exceeds logdev length\n");
+    if (bytes == 0 || bytes > (1ULL << 20) || bytes > logdev->length) {
+        fprintf(stderr, "invalid smoke io length\n");
         return 1;
     }
 
@@ -210,12 +236,12 @@ int main(int argc, char **argv)
     fill_pattern(pattern, (size_t)bytes);
     memset(readback, 0, (size_t)bytes);
 
-    if (ssu_dataplane_write(&logdev, 0, pattern, (size_t)bytes) != SSU_OK) {
+    if (ssu_dataplane_write(logdev, 0, pattern, (size_t)bytes) != SSU_OK) {
         fputs("pattern write failed\n", stderr);
         goto out;
     }
 
-    if (ssu_dataplane_read(&logdev, 0, readback, (size_t)bytes) != SSU_OK) {
+    if (ssu_dataplane_read(logdev, 0, readback, (size_t)bytes) != SSU_OK) {
         fputs("pattern read failed\n", stderr);
         goto out;
     }
@@ -226,13 +252,290 @@ int main(int argc, char **argv)
     }
 
     printf("ssu_smoke ok %s %llu bytes via %s\n",
-           logical_dev,
+           logdev->logical_dev,
            (unsigned long long)bytes,
-           logdev.phys_dev);
+           logdev->phys_dev);
     rc = 0;
 
 out:
     free(pattern);
     free(readback);
     return rc;
+}
+
+static int alloc_with_extent_retry(const ssu_alloc_req_t *req,
+                                   ssu_alloc_result_t *out)
+{
+    ssu_alloc_extent_t *extents = NULL;
+    uint32_t extent_count = 0;
+    ssu_err_t err;
+
+    err = ssu_resource_alloc(req, out, NULL, &extent_count);
+    if (err != SSU_ERR_BUFFER_TOO_SMALL || extent_count == 0) {
+        fprintf(stderr, "alloc sizing failed: %d\n", err);
+        return 0;
+    }
+
+    extents = calloc(extent_count, sizeof(*extents));
+    if (extents == NULL) {
+        fputs("out of memory\n", stderr);
+        return 0;
+    }
+
+    err = ssu_resource_alloc(req, out, extents, &extent_count);
+    free(extents);
+    if (err != SSU_OK) {
+        fprintf(stderr, "alloc failed: %d\n", err);
+        return 0;
+    }
+
+    return 1;
+}
+
+static int run_sdk_flow(const smoke_options_t *opts)
+{
+    ssu_alloc_result_t alloc_result;
+    ssu_mount_req_t mount_req = {
+        .allocate_id = NULL,
+        .host_id = opts->host_id,
+    };
+    ssu_logdev_info_t logdev;
+    int allocated = 0;
+    int mounted = 0;
+    int rc = 1;
+
+    memset(&alloc_result, 0, sizeof(alloc_result));
+    if (opts->do_alloc) {
+        ssu_alloc_req_t req = {
+            .size_bytes = opts->alloc_size,
+            .reliability = opts->reliability,
+            .share_type = SSU_SHARE_EXCLUSIVE,
+            .map_dir = SSU_MAP_DIR_FORWARD,
+            .tenant = "ssu-smoke",
+        };
+
+        if (req.size_bytes == 0) {
+            fputs("--alloc requires --size BYTES\n", stderr);
+            return 1;
+        }
+
+        if (!alloc_with_extent_retry(&req, &alloc_result)) {
+            return 1;
+        }
+        allocated = 1;
+        printf("allocated %s\n", alloc_result.allocate_id);
+    }
+
+    if (opts->do_mount) {
+        if (!allocated || opts->logical_dev == NULL) {
+            fputs("--mount requires --alloc and --dev /dev/ssuN\n", stderr);
+            goto cleanup;
+        }
+
+        mount_req.allocate_id = alloc_result.allocate_id;
+        snprintf(mount_req.logical_dev, sizeof(mount_req.logical_dev), "%s",
+                 opts->logical_dev);
+        if (ssu_resource_mount(&mount_req) != SSU_OK) {
+            fputs("mount failed\n", stderr);
+            goto cleanup;
+        }
+        mounted = 1;
+        printf("mounted %s\n", opts->logical_dev);
+    }
+
+    if (opts->do_io) {
+        memset(&logdev, 0, sizeof(logdev));
+        if (!mounted || !find_logdev_sdk(opts->logical_dev, &logdev)) {
+            fprintf(stderr, "logdev not found: %s\n", opts->logical_dev);
+            goto cleanup;
+        }
+
+        if (run_pattern_io(&logdev, opts->bytes) != 0) {
+            goto cleanup;
+        }
+    }
+
+    rc = 0;
+
+cleanup:
+    if (opts->do_unmount && mounted) {
+        ssu_err_t err = ssu_resource_unmount(opts->logical_dev);
+        if (err != SSU_OK) {
+            fprintf(stderr, "unmount failed: %d\n", err);
+            rc = 1;
+        } else {
+            mounted = 0;
+            printf("unmounted %s\n", opts->logical_dev);
+        }
+    }
+
+    if (opts->do_release && allocated) {
+        ssu_err_t err = ssu_resource_release(alloc_result.allocate_id);
+        if (err != SSU_OK) {
+            fprintf(stderr, "release failed: %d\n", err);
+            rc = 1;
+        } else {
+            allocated = 0;
+            printf("released %s\n", alloc_result.allocate_id);
+        }
+    }
+
+    return rc;
+}
+
+static int parse_u64(const char *s, uint64_t *out)
+{
+    char *end = NULL;
+    unsigned long long value;
+
+    if (s == NULL || out == NULL) {
+        return 0;
+    }
+
+    errno = 0;
+    value = strtoull(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0') {
+        return 0;
+    }
+
+    *out = (uint64_t)value;
+    return 1;
+}
+
+static void usage(void)
+{
+    fprintf(stderr,
+            "usage: ssu_smoke /dev/ssuN [--bytes N]\n"
+            "       ssu_smoke --alloc --size BYTES --stripe --mount --dev /dev/ssuN --io --pattern verify --unmount --release\n");
+}
+
+int main(int argc, char **argv)
+{
+    smoke_options_t opts = {
+        .logical_dev = NULL,
+        .host_id = "local",
+        .alloc_size = 0,
+        .bytes = 65536,
+        .bytes_set = 0,
+        .use_sdk = 0,
+        .do_alloc = 0,
+        .do_mount = 0,
+        .do_io = 0,
+        .do_unmount = 0,
+        .do_release = 0,
+        .reliability = SSU_RELIABILITY_STRIPE,
+    };
+    ssu_logdev_info_t logdev;
+    int i;
+
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--dev") == 0 && i + 1 < argc) {
+            opts.logical_dev = argv[++i];
+            continue;
+        }
+
+        if (strcmp(argv[i], "--bytes") == 0 && i + 1 < argc) {
+            if (!parse_u64(argv[++i], &opts.bytes)) {
+                usage();
+                return 1;
+            }
+            opts.bytes_set = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+            if (!parse_u64(argv[++i], &opts.alloc_size)) {
+                usage();
+                return 1;
+            }
+            opts.use_sdk = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
+            opts.host_id = argv[++i];
+            opts.use_sdk = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--alloc") == 0) {
+            opts.use_sdk = 1;
+            opts.do_alloc = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--mount") == 0) {
+            opts.use_sdk = 1;
+            opts.do_mount = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--io") == 0) {
+            opts.use_sdk = 1;
+            opts.do_io = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--unmount") == 0) {
+            opts.use_sdk = 1;
+            opts.do_unmount = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--release") == 0) {
+            opts.use_sdk = 1;
+            opts.do_release = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--stripe") == 0) {
+            opts.reliability = SSU_RELIABILITY_STRIPE;
+            opts.use_sdk = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--pattern") == 0 && i + 1 < argc) {
+            opts.use_sdk = 1;
+            if (strcmp(argv[++i], "verify") != 0) {
+                usage();
+                return 1;
+            }
+            continue;
+        }
+
+        if (opts.logical_dev == NULL) {
+            opts.logical_dev = argv[i];
+            continue;
+        }
+
+        usage();
+        return 1;
+    }
+
+    if (!opts.bytes_set && opts.alloc_size > 0 && opts.alloc_size < opts.bytes) {
+        opts.bytes = opts.alloc_size;
+    }
+
+    if (opts.use_sdk) {
+        if (!opts.do_alloc && !opts.do_mount && !opts.do_io &&
+            !opts.do_unmount && !opts.do_release) {
+            usage();
+            return 1;
+        }
+        return run_sdk_flow(&opts);
+    }
+
+    if (opts.logical_dev == NULL || opts.bytes == 0 ||
+        opts.bytes > (1ULL << 20)) {
+        fprintf(stderr, "invalid smoke parameters\n");
+        return 1;
+    }
+
+    memset(&logdev, 0, sizeof(logdev));
+    if (!find_logdev_manager(opts.logical_dev, &logdev)) {
+        fprintf(stderr, "logdev not found: %s\n", opts.logical_dev);
+        return 1;
+    }
+
+    return run_pattern_io(&logdev, opts.bytes);
 }
