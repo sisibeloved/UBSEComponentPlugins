@@ -73,10 +73,46 @@ static void remember_released_id(const char *allocate_id)
     released_count++;
 }
 
+static int find_resource_index(const ssu_resource_info_t *resources,
+                               uint32_t count, const char *ssu_id)
+{
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        if (strcmp(resources[i].ssu_id, ssu_id) == 0) {
+            return (int)i;
+        }
+    }
+
+    return -1;
+}
+
+static void refresh_resource_state(const ssu_plugin_ops_t *plugin,
+                                   ssu_resource_info_t *resource)
+{
+    char state[sizeof(resource->state)];
+
+    if (plugin->health_check == NULL) {
+        return;
+    }
+
+    memset(state, 0, sizeof(state));
+    if (plugin->health_check(resource->ssu_id, state, sizeof(state)) ==
+        SSU_OK) {
+        copy_cstr(resource->state, sizeof(resource->state), state);
+        return;
+    }
+
+    copy_cstr(resource->state, sizeof(resource->state), "OFFLINE");
+}
+
 ssu_err_t ssu_controller_refresh_pool(const ssu_plugin_ops_t *plugin)
 {
     ssu_resource_info_t discovered[SSU_CONTROLLER_MAX_RESOURCES];
+    ssu_resource_info_t next_pool[SSU_CONTROLLER_MAX_RESOURCES];
     uint32_t count = SSU_CONTROLLER_MAX_RESOURCES;
+    uint32_t next_count;
+    uint32_t i;
     ssu_err_t err;
 
     if (plugin == NULL || plugin->discover == NULL) {
@@ -93,8 +129,37 @@ ssu_err_t ssu_controller_refresh_pool(const ssu_plugin_ops_t *plugin)
         return SSU_ERR_INTERNAL;
     }
 
-    memcpy(pool, discovered, sizeof(pool[0]) * count);
-    pool_count = count;
+    memset(next_pool, 0, sizeof(next_pool));
+    for (i = 0; i < count; i++) {
+        int old_index;
+
+        next_pool[i] = discovered[i];
+        old_index = find_resource_index(pool, pool_count,
+                                        discovered[i].ssu_id);
+        if (old_index >= 0) {
+            next_pool[i].used_bytes = pool[old_index].used_bytes;
+        }
+
+        refresh_resource_state(plugin, &next_pool[i]);
+    }
+    next_count = count;
+
+    for (i = 0; i < pool_count; i++) {
+        if (find_resource_index(next_pool, next_count, pool[i].ssu_id) >= 0) {
+            continue;
+        }
+
+        if (next_count >= SSU_CONTROLLER_MAX_RESOURCES) {
+            return SSU_ERR_INTERNAL;
+        }
+
+        next_pool[next_count] = pool[i];
+        refresh_resource_state(plugin, &next_pool[next_count]);
+        next_count++;
+    }
+
+    memcpy(pool, next_pool, sizeof(pool[0]) * next_count);
+    pool_count = next_count;
     return SSU_OK;
 }
 

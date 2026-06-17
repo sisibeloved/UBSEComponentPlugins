@@ -60,6 +60,47 @@ int main(void)
         return 1;
     }
 
+    char devname[64];
+    memset(devname, 0, sizeof(devname));
+    if (expect_err("connect second mock ssu",
+                   plugin->connect("mock-ssu1", devname, sizeof(devname)),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (strcmp(devname, "/dev/nullb1") != 0) {
+        fprintf(stderr, "expected /dev/nullb1, got %s\n", devname);
+        return 1;
+    }
+
+    setenv("SSU_MOCK_SSU_COUNT", "1", 1);
+    if (expect_err("refresh pool after device loss",
+                   ssu_controller_refresh_pool(plugin),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    memset(resources, 0, sizeof(resources));
+    count = 2;
+    if (expect_err("query pool after device loss",
+                   ssu_controller_query_pool(resources, &count),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (count != 2) {
+        fprintf(stderr, "expected 2 managed resources after loss, got %u\n",
+                count);
+        return 1;
+    }
+
+    if (strcmp(resources[0].state, "ONLINE") != 0 ||
+        strcmp(resources[1].state, "OFFLINE") != 0) {
+        fprintf(stderr, "expected ONLINE/OFFLINE after loss, got %s/%s\n",
+                resources[0].state, resources[1].state);
+        return 1;
+    }
+
     memset(resources, 0, sizeof(resources));
     count = 2;
     ssu_query_req_t req = {
