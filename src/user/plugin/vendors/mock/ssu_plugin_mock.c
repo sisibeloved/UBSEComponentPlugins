@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #define MOCK_TOTAL_BYTES (1ULL << 30)
@@ -32,6 +33,7 @@ typedef struct {
 
 static mock_namespace_t namespaces[MOCK_MAX_NAMESPACES];
 static mock_mount_t mounts[MOCK_MAX_MOUNTS];
+static int backend_initialized[MOCK_MAX_NULLBLK];
 static uint64_t next_ns_id;
 
 static int parse_uint32_tail(const char *s, uint32_t *out)
@@ -91,6 +93,8 @@ static ssu_err_t mock_backend_file(uint32_t index, char *out_devname,
     char path[256];
     int rc;
     int fd;
+    int flags = O_RDWR | O_CREAT;
+    struct stat st;
 
     if (backend_dir == NULL || backend_dir[0] == '\0') {
         return SSU_ERR_NOT_FOUND;
@@ -105,16 +109,29 @@ static ssu_err_t mock_backend_file(uint32_t index, char *out_devname,
         return SSU_ERR_INVALID;
     }
 
-    fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (index < MOCK_MAX_NULLBLK && !backend_initialized[index]) {
+        flags |= O_TRUNC;
+    }
+
+    fd = open(path, flags, 0600);
     if (fd < 0) {
         return SSU_ERR_IO;
     }
 
-    if (ftruncate(fd, (off_t)MOCK_TOTAL_BYTES) != 0) {
+    if (fstat(fd, &st) != 0) {
+        close(fd);
+        return SSU_ERR_IO;
+    }
+
+    if (st.st_size < (off_t)MOCK_TOTAL_BYTES &&
+        ftruncate(fd, (off_t)MOCK_TOTAL_BYTES) != 0) {
         close(fd);
         return SSU_ERR_IO;
     }
     close(fd);
+    if (index < MOCK_MAX_NULLBLK) {
+        backend_initialized[index] = 1;
+    }
 
     rc = snprintf(out_devname, n, "%s", path);
     if (rc < 0 || (size_t)rc >= n) {

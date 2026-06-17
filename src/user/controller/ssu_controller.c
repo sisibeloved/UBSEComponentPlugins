@@ -430,7 +430,11 @@ ssu_err_t ssu_controller_mount(const ssu_plugin_ops_t *plugin,
         return SSU_ERR_NOT_FOUND;
     }
 
-    if (find_logdev_by_dev(req->logical_dev) != NULL ||
+    if (find_logdev_by_dev(req->logical_dev) != NULL) {
+        return SSU_ERR_BUSY;
+    }
+
+    if (allocation->info.share_type != SSU_SHARE_SHARED &&
         allocation_has_logdev(req->allocate_id)) {
         return SSU_ERR_BUSY;
     }
@@ -500,12 +504,15 @@ ssu_err_t ssu_controller_unmount(const ssu_plugin_ops_t *plugin,
     }
 
     allocation = find_allocation(logdev->info.allocate_id);
+    memset(logdev, 0, sizeof(*logdev));
     if (allocation != NULL) {
+        const char *state = allocation_has_logdev(allocation->info.allocate_id) ?
+                            "MOUNTED" : "ACTIVE";
+
         copy_cstr(allocation->info.state, sizeof(allocation->info.state),
-                  "ACTIVE");
+                  state);
     }
 
-    memset(logdev, 0, sizeof(*logdev));
     return SSU_OK;
 }
 

@@ -32,6 +32,18 @@ control_lifecycle = executable(
 
 test('control_lifecycle', control_lifecycle)
 
+shared_mount = executable(
+  'shared_mount',
+  sources: ['shared_mount.c'],
+  include_directories: inc,
+  dependencies: [
+    ssu_controller_dep,
+  ],
+  link_with: libssu_plugin_mock,
+)
+
+test('shared_mount', shared_mount)
+
 api_lifecycle = executable(
   'api_lifecycle',
   sources: ['api_lifecycle.c'],

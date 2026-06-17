@@ -12,6 +12,12 @@
 
 #define RESPONSE_SIZE 8192U
 
+typedef enum {
+    SMOKE_IO_VERIFY = 0,
+    SMOKE_IO_WRITE_ONLY = 1,
+    SMOKE_IO_READ_ONLY = 2,
+} smoke_io_mode_t;
+
 typedef struct {
     const char *logical_dev;
     const char *host_id;
@@ -25,6 +31,7 @@ typedef struct {
     int do_unmount;
     int do_release;
     ssu_reliability_t reliability;
+    smoke_io_mode_t io_mode;
 } smoke_options_t;
 
 static int send_all(int fd, const char *buf, size_t n)
@@ -215,10 +222,11 @@ static void fill_pattern(unsigned char *buf, size_t n)
     }
 }
 
-static int run_pattern_io(const ssu_logdev_info_t *logdev, uint64_t bytes)
+static int run_pattern_io(const ssu_logdev_info_t *logdev, uint64_t bytes,
+                          smoke_io_mode_t mode)
 {
     unsigned char *pattern;
-    unsigned char *readback;
+    unsigned char *readback = NULL;
     int rc = 1;
 
     if (bytes == 0 || bytes > (1ULL << 20) || bytes > logdev->length) {
@@ -227,34 +235,53 @@ static int run_pattern_io(const ssu_logdev_info_t *logdev, uint64_t bytes)
     }
 
     pattern = malloc((size_t)bytes);
-    readback = malloc((size_t)bytes);
-    if (pattern == NULL || readback == NULL) {
+    if (mode != SMOKE_IO_WRITE_ONLY) {
+        readback = malloc((size_t)bytes);
+    }
+    if (pattern == NULL || (mode != SMOKE_IO_WRITE_ONLY &&
+                            readback == NULL)) {
         fputs("out of memory\n", stderr);
         goto out;
     }
 
     fill_pattern(pattern, (size_t)bytes);
-    memset(readback, 0, (size_t)bytes);
 
-    if (ssu_dataplane_write(logdev, 0, pattern, (size_t)bytes) != SSU_OK) {
+    if (mode != SMOKE_IO_READ_ONLY &&
+        ssu_dataplane_write(logdev, 0, pattern, (size_t)bytes) != SSU_OK) {
         fputs("pattern write failed\n", stderr);
         goto out;
     }
 
-    if (ssu_dataplane_read(logdev, 0, readback, (size_t)bytes) != SSU_OK) {
-        fputs("pattern read failed\n", stderr);
-        goto out;
+    if (mode != SMOKE_IO_WRITE_ONLY) {
+        memset(readback, 0, (size_t)bytes);
+        if (ssu_dataplane_read(logdev, 0, readback,
+                               (size_t)bytes) != SSU_OK) {
+            fputs("pattern read failed\n", stderr);
+            goto out;
+        }
+
+        if (memcmp(pattern, readback, (size_t)bytes) != 0) {
+            fputs("pattern mismatch\n", stderr);
+            goto out;
+        }
     }
 
-    if (memcmp(pattern, readback, (size_t)bytes) != 0) {
-        fputs("pattern mismatch\n", stderr);
-        goto out;
+    if (mode == SMOKE_IO_WRITE_ONLY) {
+        printf("ssu_smoke wrote %s %llu bytes via %s\n",
+               logdev->logical_dev,
+               (unsigned long long)bytes,
+               logdev->phys_dev);
+    } else if (mode == SMOKE_IO_READ_ONLY) {
+        printf("ssu_smoke read ok %s %llu bytes via %s\n",
+               logdev->logical_dev,
+               (unsigned long long)bytes,
+               logdev->phys_dev);
+    } else {
+        printf("ssu_smoke ok %s %llu bytes via %s\n",
+               logdev->logical_dev,
+               (unsigned long long)bytes,
+               logdev->phys_dev);
     }
-
-    printf("ssu_smoke ok %s %llu bytes via %s\n",
-           logdev->logical_dev,
-           (unsigned long long)bytes,
-           logdev->phys_dev);
     rc = 0;
 
 out:
@@ -350,7 +377,7 @@ static int run_sdk_flow(const smoke_options_t *opts)
             goto cleanup;
         }
 
-        if (run_pattern_io(&logdev, opts->bytes) != 0) {
+        if (run_pattern_io(&logdev, opts->bytes, opts->io_mode) != 0) {
             goto cleanup;
         }
     }
@@ -406,6 +433,7 @@ static void usage(void)
 {
     fprintf(stderr,
             "usage: ssu_smoke /dev/ssuN [--bytes N]\n"
+            "       ssu_smoke /dev/ssuN [--bytes N] [--write-only|--read-only]\n"
             "       ssu_smoke --alloc --size BYTES --stripe --mount --dev /dev/ssuN --io --pattern verify --unmount --release\n");
 }
 
@@ -424,6 +452,7 @@ int main(int argc, char **argv)
         .do_unmount = 0,
         .do_release = 0,
         .reliability = SSU_RELIABILITY_STRIPE,
+        .io_mode = SMOKE_IO_VERIFY,
     };
     ssu_logdev_info_t logdev;
     int i;
@@ -488,6 +517,16 @@ int main(int argc, char **argv)
             continue;
         }
 
+        if (strcmp(argv[i], "--write-only") == 0) {
+            opts.io_mode = SMOKE_IO_WRITE_ONLY;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--read-only") == 0) {
+            opts.io_mode = SMOKE_IO_READ_ONLY;
+            continue;
+        }
+
         if (strcmp(argv[i], "--stripe") == 0) {
             opts.reliability = SSU_RELIABILITY_STRIPE;
             opts.use_sdk = 1;
@@ -537,5 +576,5 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    return run_pattern_io(&logdev, opts.bytes);
+    return run_pattern_io(&logdev, opts.bytes, opts.io_mode);
 }
