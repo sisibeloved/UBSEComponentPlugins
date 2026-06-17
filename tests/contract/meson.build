@@ -19,3 +19,15 @@ mock_pool = executable(
 )
 
 test('mock_pool', mock_pool)
+
+control_lifecycle = executable(
+  'control_lifecycle',
+  sources: ['control_lifecycle.c'],
+  include_directories: inc,
+  dependencies: [
+    ssu_controller_dep,
+  ],
+  link_with: libssu_plugin_mock,
+)
+
+test('control_lifecycle', control_lifecycle)

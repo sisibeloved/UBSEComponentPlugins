@@ -1,0 +1,123 @@
+#include "ssu_controller.h"
+#include "ssu_plugin.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+extern ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
+                                      const ssu_alloc_req_t *req,
+                                      ssu_alloc_result_t *out,
+                                      ssu_alloc_extent_t *out_extents,
+                                      uint32_t *inout_extent_count);
+extern ssu_err_t ssu_controller_release(const ssu_plugin_ops_t *plugin,
+                                        const char *allocate_id);
+extern ssu_err_t ssu_controller_query_allocations(ssu_allocation_info_t *out,
+                                                  uint32_t *inout_count);
+
+static int expect_err(const char *name, ssu_err_t actual, ssu_err_t expected)
+{
+    if (actual != expected) {
+        fprintf(stderr, "%s: expected %d, got %d\n", name, expected, actual);
+        return 1;
+    }
+
+    return 0;
+}
+
+int main(void)
+{
+    const ssu_plugin_ops_t *plugin;
+    ssu_alloc_req_t req = {
+        .size_bytes = 8192,
+        .reliability = SSU_RELIABILITY_STRIPE,
+        .share_type = SSU_SHARE_EXCLUSIVE,
+        .map_dir = SSU_MAP_DIR_FORWARD,
+        .tenant = "tenant-a",
+    };
+    ssu_alloc_result_t result;
+    ssu_alloc_extent_t extents[1];
+    uint32_t extent_count = 1;
+    ssu_allocation_info_t allocations[1];
+    uint32_t allocation_count = 1;
+
+    setenv("SSU_MOCK_SSU_COUNT", "1", 1);
+
+    plugin = ssu_plugin_entry();
+    if (plugin == NULL) {
+        fputs("mock plugin did not return ops\n", stderr);
+        return 1;
+    }
+
+    if (expect_err("refresh pool", ssu_controller_refresh_pool(plugin),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    memset(&result, 0, sizeof(result));
+    memset(extents, 0, sizeof(extents));
+    if (expect_err("alloc", ssu_controller_alloc(plugin, &req, &result,
+                                                 extents, &extent_count),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (strcmp(result.allocate_id, "alloc-0") != 0 ||
+        result.logical_size_bytes != req.size_bytes ||
+        result.extent_count != 1 || extent_count != 1) {
+        fputs("alloc returned unexpected result header\n", stderr);
+        return 1;
+    }
+
+    if (strcmp(extents[0].ssu_id, "mock-ssu0") != 0 ||
+        strcmp(extents[0].host_id, "mock-host0") != 0 ||
+        strcmp(extents[0].ns_id, "mock-ns0") != 0 ||
+        extents[0].logical_offset != 0 ||
+        extents[0].length != req.size_bytes) {
+        fputs("alloc returned unexpected extent\n", stderr);
+        return 1;
+    }
+
+    memset(allocations, 0, sizeof(allocations));
+    if (expect_err("query allocations",
+                   ssu_controller_query_allocations(allocations,
+                                                    &allocation_count),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (allocation_count != 1 ||
+        strcmp(allocations[0].allocate_id, "alloc-0") != 0 ||
+        strcmp(allocations[0].state, "ACTIVE") != 0 ||
+        allocations[0].length != req.size_bytes) {
+        fputs("query allocations returned unexpected active allocation\n",
+              stderr);
+        return 1;
+    }
+
+    if (expect_err("release", ssu_controller_release(plugin, "alloc-0"),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    allocation_count = 1;
+    memset(allocations, 0, sizeof(allocations));
+    if (expect_err("query allocations after release",
+                   ssu_controller_query_allocations(allocations,
+                                                    &allocation_count),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (allocation_count != 0) {
+        fputs("release should remove allocation from active view\n", stderr);
+        return 1;
+    }
+
+    if (expect_err("release idempotent",
+                   ssu_controller_release(plugin, "alloc-0"), SSU_OK) != 0) {
+        return 1;
+    }
+
+    return 0;
+}

@@ -103,6 +103,11 @@ ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
                                          inout_count);
     }
 
+    if (req->type == SSU_QUERY_ALLOCATION) {
+        return ssu_controller_query_allocations(
+            (ssu_allocation_info_t *)out_array, inout_count);
+    }
+
     if (out_array == NULL || *inout_count == 0) {
         *inout_count = 0;
         return SSU_OK;
