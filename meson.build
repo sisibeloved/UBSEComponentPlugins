@@ -10,11 +10,12 @@ project(
 
 cc = meson.get_compiler('c')
 inc = include_directories('include')
+ssu_headers_dep = declare_dependency(include_directories: inc)
 
-subdir('src/user/api')
 subdir('src/user/controller')
 subdir('src/user/scheduler')
 subdir('src/user/plugin')
+subdir('src/user/api')
 subdir('src/user/runtime')
 subdir('tools')
 subdir('tests')

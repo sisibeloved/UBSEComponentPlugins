@@ -1,5 +1,6 @@
 #include "ssu_plugin.h"
 
+#include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -10,13 +11,34 @@ static const char *mock_name(void)
 
 static ssu_err_t mock_discover(ssu_resource_info_t *out, uint32_t *inout_count)
 {
-    (void)out;
+    const char *configured_count;
+    unsigned long count;
+    uint32_t i;
 
     if (inout_count == NULL) {
         return SSU_ERR_INVALID;
     }
 
-    *inout_count = 0;
+    configured_count = getenv("SSU_MOCK_SSU_COUNT");
+    count = configured_count == NULL ? 0UL : strtoul(configured_count, NULL, 10);
+    if (count > UINT32_MAX) {
+        return SSU_ERR_INVALID;
+    }
+
+    if (out == NULL || *inout_count < (uint32_t)count) {
+        *inout_count = (uint32_t)count;
+        return count == 0 ? SSU_OK : SSU_ERR_BUFFER_TOO_SMALL;
+    }
+
+    for (i = 0; i < (uint32_t)count; i++) {
+        snprintf(out[i].ssu_id, sizeof(out[i].ssu_id), "mock-ssu%u", i);
+        snprintf(out[i].host_id, sizeof(out[i].host_id), "mock-host%u", i);
+        out[i].total_bytes = 1ULL << 30;
+        out[i].used_bytes = 0;
+        snprintf(out[i].state, sizeof(out[i].state), "ONLINE");
+    }
+
+    *inout_count = (uint32_t)count;
     return SSU_OK;
 }
 

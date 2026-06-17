@@ -1,4 +1,5 @@
 #include "ssu_api.h"
+#include "ssu_controller.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -95,6 +96,11 @@ ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
     expected_size = query_elem_size(req->type);
     if (expected_size == 0 || out_elem_size != expected_size) {
         return SSU_ERR_INVALID;
+    }
+
+    if (req->type == SSU_QUERY_POOL) {
+        return ssu_controller_query_pool((ssu_resource_info_t *)out_array,
+                                         inout_count);
     }
 
     if (out_array == NULL || *inout_count == 0) {
