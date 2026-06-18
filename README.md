@@ -18,6 +18,7 @@
 - [构建](#构建)
 - [测试与验收](#测试与验收)
 - [运行时角色与 CLI](#运行时角色与-cli)
+- [上游 `ubs-engine` 如何使用本组件](#上游-ubs-engine-如何使用本组件)
 - [项目状态（MVP）](#项目状态mvp)
 - [设计文档](#设计文档)
 - [路线图（MVP 之后）](#路线图mvp-之后)
@@ -213,6 +214,101 @@ ubsectl query   --type pool|allocation|logdev
 ```
 
 控制面 RPC 走 Unix socket，路径由环境变量 `SSU_MGR_SOCKET` 指定（默认本地）。
+
+---
+
+## 上游 `ubs-engine` 如何使用本组件
+
+本组件以**用户态 `.so` + 内核态 `.ko`** 独立交付，与上游 `ubs-engine` **不共享构建系统、不共享源码树**。上游 daemon 通过两条路径接入：**作为插件被加载**、**作为 SDK 客户端调用**。
+
+### 1. 安装交付件
+
+```bash
+# 构建并安装（以 mock 为例，真实厂商替换 vendor）
+meson setup build -Dvendor=mock -Dbuild_kernel=enabled \
+    -Dkernel_src_dir=/lib/modules/$(uname -r)/build
+ninja -C build && sudo ninja -C build install
+sudo depmod -a                       # 让 modprobe 能找到 .ko
+```
+
+安装后产物落位（§8.5）：
+
+| 产物 | 路径 | 用途 |
+| ---- | ---- | ---- |
+| `libssu_api.so` + 头文件 | `/usr/lib`、`/usr/include` | UBS IO / 业务链接 `libubse` SDK |
+| `libssu_controller.so`、`libssu_scheduler.so` | `/usr/lib/ubs-engine` | daemon 加载 |
+| `libssu_plugin_*.so` | `/usr/lib/ubs-engine/ssu` | 厂商 plugin（进程内 dlopen） |
+| `ssu_reqshim.ko` | `/lib/modules/<kver>/extra/` | 内核模块 |
+| `ssu.conf`、`ubse-ssu.service` | `/etc/ubs-engine/`、systemd unit | 配置与托管 |
+
+### 2. 路径 A：上游 daemon 作为插件加载本组件
+
+上游 daemon 经其既有 `framework/plugin_mgr` 机制，在运行期 `dlopen` 本组件用户态库，并按 `ssu.conf` 的 `role` 把本组件作为 **Manager / Agent 角色装配进 daemon 进程**：
+
+```ini
+# /etc/ubs-engine/ssu.conf
+role=manager          # 管理节点：manager；业务宿主机：agent
+vendor=<vendor>       # mock | <厂商>
+plugin_dir=/usr/lib/ubs-engine/ssu
+```
+
+```
+┌──────── ubse daemon (上游) ────────┐
+│ framework/plugin_mgr ──dlopen──► 本组件用户态 .so（API/Controller/）
+│                                  │   Scheduler/Plugin），按 role 装配
+│                                  │
+│                                  ▼ 加载 ReqShim：
+│                                 modprobe ssu_reqshim.ko
+└──────────────────────────────────┼─────────────────────────────┘
+                                   ▼
+                       ┌── 内核 ssu_reqshim.ko ──┐
+                       │ /dev/ssuN 逻辑块设备     │
+                       │ NVMe 命令转换/扇出       │
+                       └─────────────────────────┘
+```
+
+- 用户态库被加载后，本组件的 Controller/Scheduler/Plugin 即在 daemon 进程内运行；本组件自带 `ssu-mgr`/`ssu-agent` 入口在**独立自验**时使用，接入上游后由 daemon 托管生命周期（`ubse-ssu.service`）。
+- 内核侧 ReqShim 由 daemon（Agent 角色节点）`modprobe ssu_reqshim` 加载，加载后出现控制设备 `/dev/ssu-ctl`；本组件经其 ioctl（`SSU_IOC_LOGDEV_CREATE`/`MAP_ADD` 等 UAPI）建/拆逻辑设备与映射。
+
+### 3. 路径 B：上游 / UBS IO 作为 SDK 客户端调用
+
+UBS IO、业务系统或管理员**链接 `libubse` SDK**（或用 `ubsectl` CLI）调 5 类操作，经 Unix-socket RPC 路由到 Controller（Agent 本地可决的 mount/unmount 在本节点处理；alloc/release/query 等全局动作上送 Manager）：
+
+```c
+#include "ssu_api.h"
+
+ssu_alloc_req_t req = { .size_bytes = 1ULL<<30,
+                        .reliability = SSU_RELIABILITY_STRIPE,
+                        .share_type  = SSU_SHARE_EXCLUSIVE };
+ssu_alloc_result_t  out;
+ssu_alloc_extent_t  extents[8];
+uint32_t            n = 8;
+
+if (ssu_resource_alloc(&req, &out, extents, &n) == SSU_ERR_BUFFER_TOO_SMALL) {
+    /* 扩容 extents 后重试 */
+}
+
+ssu_mount_req_t m = { .allocate_id = out.allocate_id,
+                      .host_id = "node-1", .logical_dev = "/dev/ssu0" };
+ssu_resource_mount(&m);
+/* 此后对 /dev/ssu0 的 read/write 即数据面 I/O */
+```
+
+> 调用方进程需能访问 Manager 的 Unix socket（路径由 `SSU_MGR_SOCKET` 指定，或经 `ubsectl` 透传）。
+
+### 4. 真实联调：把 mock 桩换成真实依赖
+
+上游接入时无需改动本组件代码，仅替换运行依赖：
+
+| mock 桩（自验） | 真实依赖（联调） |
+| ---- | ---- |
+| `null_blk` / 文件后端 | 真实 SSU 硬件 |
+| mock plugin（`vendor=mock`） | 厂商 plugin（`vendor=<vendor>`） |
+| `ssu_smoke`（UBS IO 替身） | 真实 UBS IO / KV Cache |
+| 本组件自带 `ssu-mgr`/`ssu-agent` | 上游 ubse daemon 托管 |
+| ReqShim 数据面 `reqshim_phys` mock 路径（bio 重映射） | 真实 NVMe request → LBC INI → URMA 路径 |
+
+替换后**跑同一套 `tests/mvp*/check.sh` 验收脚本**即可对照验证联调结果。
 
 ---
 
