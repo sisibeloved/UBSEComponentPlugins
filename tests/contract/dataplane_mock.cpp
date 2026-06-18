@@ -20,11 +20,7 @@ int main(void)
 {
     char path[] = "/tmp/ssu-dataplane-XXXXXX";
     int fd;
-    ssu_logdev_info_t logdev = {
-        .logical_offset = 0,
-        .length = 4096,
-        .phys_sector = 4,
-    };
+    ssu_logdev_info_t logdev = {};
     unsigned char pattern[512];
     unsigned char readback[512];
     unsigned char direct[512];
@@ -37,6 +33,8 @@ int main(void)
     }
     close(fd);
 
+    logdev.length = 4096;
+    logdev.phys_sector = 4;
     snprintf(logdev.logical_dev, sizeof(logdev.logical_dev), "/dev/ssu0");
     snprintf(logdev.phys_dev, sizeof(logdev.phys_dev), "%s", path);
     snprintf(logdev.allocate_id, sizeof(logdev.allocate_id), "alloc-0");

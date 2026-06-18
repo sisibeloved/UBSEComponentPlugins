@@ -103,9 +103,8 @@ int main(void)
 
     memset(resources, 0, sizeof(resources));
     count = 2;
-    ssu_query_req_t req = {
-        .type = SSU_QUERY_POOL,
-    };
+    ssu_query_req_t req = {};
+    req.type = SSU_QUERY_POOL;
     if (expect_err("api query pool",
                    ssu_resource_query(&req, resources,
                                       sizeof(ssu_resource_info_t), &count),

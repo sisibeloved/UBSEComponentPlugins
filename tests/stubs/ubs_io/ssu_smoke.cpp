@@ -169,15 +169,14 @@ static int find_logdev_manager(const char *logical_dev, ssu_logdev_info_t *out)
 
 static int find_logdev_sdk(const char *logical_dev, ssu_logdev_info_t *out)
 {
-    ssu_query_req_t req = {
-        .type = SSU_QUERY_LOGDEV,
-        .logical_dev = logical_dev,
-    };
+    ssu_query_req_t req = {};
     ssu_logdev_info_t *logdevs;
     uint32_t count = 0;
     uint32_t i;
     ssu_err_t err;
 
+    req.type = SSU_QUERY_LOGDEV;
+    req.logical_dev = logical_dev;
     err = ssu_resource_query(&req, NULL, sizeof(ssu_logdev_info_t), &count);
     if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
         fprintf(stderr, "query logdev failed: %d\n", err);
@@ -188,7 +187,7 @@ static int find_logdev_sdk(const char *logical_dev, ssu_logdev_info_t *out)
         return 0;
     }
 
-    logdevs = calloc(count, sizeof(*logdevs));
+    logdevs = (ssu_logdev_info_t *)calloc(count, sizeof(*logdevs));
     if (logdevs == NULL) {
         fputs("out of memory\n", stderr);
         return 0;
@@ -234,9 +233,9 @@ static int run_pattern_io(const ssu_logdev_info_t *logdev, uint64_t bytes,
         return 1;
     }
 
-    pattern = malloc((size_t)bytes);
+    pattern = (unsigned char *)malloc((size_t)bytes);
     if (mode != SMOKE_IO_WRITE_ONLY) {
-        readback = malloc((size_t)bytes);
+        readback = (unsigned char *)malloc((size_t)bytes);
     }
     if (pattern == NULL || (mode != SMOKE_IO_WRITE_ONLY &&
                             readback == NULL)) {
@@ -303,7 +302,7 @@ static int alloc_with_extent_retry(const ssu_alloc_req_t *req,
         return 0;
     }
 
-    extents = calloc(extent_count, sizeof(*extents));
+    extents = (ssu_alloc_extent_t *)calloc(extent_count, sizeof(*extents));
     if (extents == NULL) {
         fputs("out of memory\n", stderr);
         return 0;
@@ -322,10 +321,7 @@ static int alloc_with_extent_retry(const ssu_alloc_req_t *req,
 static int run_sdk_flow(const smoke_options_t *opts)
 {
     ssu_alloc_result_t alloc_result;
-    ssu_mount_req_t mount_req = {
-        .allocate_id = NULL,
-        .host_id = opts->host_id,
-    };
+    ssu_mount_req_t mount_req = {};
     ssu_logdev_info_t logdev;
     int allocated = 0;
     int mounted = 0;
@@ -333,13 +329,13 @@ static int run_sdk_flow(const smoke_options_t *opts)
 
     memset(&alloc_result, 0, sizeof(alloc_result));
     if (opts->do_alloc) {
-        ssu_alloc_req_t req = {
-            .size_bytes = opts->alloc_size,
-            .reliability = opts->reliability,
-            .share_type = SSU_SHARE_EXCLUSIVE,
-            .map_dir = SSU_MAP_DIR_FORWARD,
-            .tenant = "ssu-smoke",
-        };
+        ssu_alloc_req_t req = {};
+
+        req.size_bytes = opts->alloc_size;
+        req.reliability = opts->reliability;
+        req.share_type = SSU_SHARE_EXCLUSIVE;
+        req.map_dir = SSU_MAP_DIR_FORWARD;
+        req.tenant = "ssu-smoke";
 
         if (req.size_bytes == 0) {
             fputs("--alloc requires --size BYTES\n", stderr);
@@ -353,6 +349,7 @@ static int run_sdk_flow(const smoke_options_t *opts)
         printf("allocated %s\n", alloc_result.allocate_id);
     }
 
+    mount_req.host_id = opts->host_id;
     if (opts->do_mount) {
         if (!allocated || opts->logical_dev == NULL) {
             fputs("--mount requires --alloc and --dev /dev/ssuN\n", stderr);
@@ -439,23 +436,14 @@ static void usage(void)
 
 int main(int argc, char **argv)
 {
-    smoke_options_t opts = {
-        .logical_dev = NULL,
-        .host_id = "local",
-        .alloc_size = 0,
-        .bytes = 65536,
-        .bytes_set = 0,
-        .use_sdk = 0,
-        .do_alloc = 0,
-        .do_mount = 0,
-        .do_io = 0,
-        .do_unmount = 0,
-        .do_release = 0,
-        .reliability = SSU_RELIABILITY_STRIPE,
-        .io_mode = SMOKE_IO_VERIFY,
-    };
+    smoke_options_t opts = {};
     ssu_logdev_info_t logdev;
     int i;
+
+    opts.host_id = "local";
+    opts.bytes = 65536;
+    opts.reliability = SSU_RELIABILITY_STRIPE;
+    opts.io_mode = SMOKE_IO_VERIFY;
 
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--dev") == 0 && i + 1 < argc) {

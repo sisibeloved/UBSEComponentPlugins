@@ -1,6 +1,6 @@
 executable(
   'ubsectl',
-  sources: ['ubsectl.c'],
+  sources: ['ubsectl.cpp'],
   include_directories: inc,
   dependencies: [
     ssu_api_dep,

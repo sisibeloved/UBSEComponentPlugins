@@ -16,27 +16,24 @@ static int expect_err(const char *name, ssu_err_t actual, ssu_err_t expected)
 
 int main(void)
 {
-    ssu_alloc_req_t alloc_req = {
-        .size_bytes = 8192,
-        .reliability = SSU_RELIABILITY_STRIPE,
-        .share_type = SSU_SHARE_EXCLUSIVE,
-        .map_dir = SSU_MAP_DIR_FORWARD,
-        .tenant = "tenant-api",
-    };
+    ssu_alloc_req_t alloc_req = {};
     ssu_alloc_result_t alloc_result;
     ssu_alloc_extent_t extents[1];
     uint32_t extent_count = 1;
-    ssu_mount_req_t mount_req = {
-        .allocate_id = NULL,
-        .host_id = "local",
-    };
-    ssu_query_req_t query_req = {
-        .type = SSU_QUERY_LOGDEV,
-    };
+    ssu_mount_req_t mount_req = {};
+    ssu_query_req_t query_req = {};
     ssu_logdev_info_t logdevs[1];
     uint32_t logdev_count = 1;
 
     setenv("SSU_MOCK_SSU_COUNT", "1", 1);
+
+    alloc_req.size_bytes = 8192;
+    alloc_req.reliability = SSU_RELIABILITY_STRIPE;
+    alloc_req.share_type = SSU_SHARE_EXCLUSIVE;
+    alloc_req.map_dir = SSU_MAP_DIR_FORWARD;
+    alloc_req.tenant = "tenant-api";
+    mount_req.host_id = "local";
+    query_req.type = SSU_QUERY_LOGDEV;
 
     memset(&alloc_result, 0, sizeof(alloc_result));
     memset(extents, 0, sizeof(extents));

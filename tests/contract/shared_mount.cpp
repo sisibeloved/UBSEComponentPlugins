@@ -58,26 +58,22 @@ static int query_allocation_state(const char *expected)
 int main(void)
 {
     const ssu_plugin_ops_t *plugin;
-    ssu_alloc_req_t req = {
-        .size_bytes = 8192,
-        .reliability = SSU_RELIABILITY_STRIPE,
-        .share_type = SSU_SHARE_SHARED,
-        .map_dir = SSU_MAP_DIR_FORWARD,
-        .tenant = "tenant-shared",
-    };
+    ssu_alloc_req_t req = {};
     ssu_alloc_result_t result;
     ssu_alloc_extent_t extents[1];
     uint32_t extent_count = 1;
-    ssu_mount_req_t mount_a = {
-        .allocate_id = NULL,
-        .host_id = "nodeA",
-    };
-    ssu_mount_req_t mount_b = {
-        .allocate_id = NULL,
-        .host_id = "nodeB",
-    };
+    ssu_mount_req_t mount_a = {};
+    ssu_mount_req_t mount_b = {};
 
     setenv("SSU_MOCK_SSU_COUNT", "1", 1);
+
+    req.size_bytes = 8192;
+    req.reliability = SSU_RELIABILITY_STRIPE;
+    req.share_type = SSU_SHARE_SHARED;
+    req.map_dir = SSU_MAP_DIR_FORWARD;
+    req.tenant = "tenant-shared";
+    mount_a.host_id = "nodeA";
+    mount_b.host_id = "nodeB";
 
     plugin = ssu_plugin_entry();
     if (plugin == NULL) {

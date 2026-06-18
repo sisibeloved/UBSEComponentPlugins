@@ -16,22 +16,21 @@ static int expect_err(const char *name, ssu_err_t actual, ssu_err_t expected)
 
 int main(void)
 {
-    ssu_alloc_req_t req = {
-        .size_bytes = 4096,
-        .reliability = SSU_RELIABILITY_STRIPE,
-        .share_type = SSU_SHARE_EXCLUSIVE,
-        .map_dir = SSU_MAP_DIR_FORWARD,
-        .tenant = "tenant-buffer",
-    };
-    ssu_query_req_t query_req = {
-        .type = SSU_QUERY_ALLOCATION,
-    };
+    ssu_alloc_req_t req = {};
+    ssu_query_req_t query_req = {};
     ssu_alloc_result_t result;
     ssu_alloc_extent_t *extents;
     uint32_t extent_count = 0;
     uint32_t allocation_count = 0;
 
     setenv("SSU_MOCK_SSU_COUNT", "1", 1);
+
+    req.size_bytes = 4096;
+    req.reliability = SSU_RELIABILITY_STRIPE;
+    req.share_type = SSU_SHARE_EXCLUSIVE;
+    req.map_dir = SSU_MAP_DIR_FORWARD;
+    req.tenant = "tenant-buffer";
+    query_req.type = SSU_QUERY_ALLOCATION;
 
     memset(&result, 0, sizeof(result));
     if (expect_err("alloc extent sizing",
@@ -58,7 +57,7 @@ int main(void)
         return 1;
     }
 
-    extents = calloc(extent_count, sizeof(*extents));
+    extents = (ssu_alloc_extent_t *)calloc(extent_count, sizeof(*extents));
     if (extents == NULL) {
         fputs("out of memory\n", stderr);
         return 1;

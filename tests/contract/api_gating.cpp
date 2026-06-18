@@ -16,13 +16,13 @@ static int expect_err(const char *name, ssu_err_t actual, ssu_err_t expected)
 
 static int test_reliability_gate(ssu_reliability_t reliability)
 {
-    ssu_alloc_req_t req = {
-        .size_bytes = 4096,
-        .reliability = reliability,
-        .share_type = SSU_SHARE_EXCLUSIVE,
-        .map_dir = SSU_MAP_DIR_FORWARD,
-    };
+    ssu_alloc_req_t req = {};
     ssu_alloc_result_t out;
+
+    req.size_bytes = 4096;
+    req.reliability = reliability;
+    req.share_type = SSU_SHARE_EXCLUSIVE;
+    req.map_dir = SSU_MAP_DIR_FORWARD;
 
     return expect_err("reliability gate",
                       ssu_resource_alloc(&req, &out, NULL, NULL),
@@ -31,18 +31,18 @@ static int test_reliability_gate(ssu_reliability_t reliability)
 
 static int test_stripe_alloc_success(void)
 {
-    ssu_alloc_req_t req = {
-        .size_bytes = 4096,
-        .reliability = SSU_RELIABILITY_STRIPE,
-        .share_type = SSU_SHARE_EXCLUSIVE,
-        .map_dir = SSU_MAP_DIR_FORWARD,
-    };
+    ssu_alloc_req_t req = {};
     ssu_alloc_result_t out;
     ssu_alloc_extent_t extents[1];
     uint32_t extent_count = 1;
     ssu_err_t err;
 
     setenv("SSU_MOCK_SSU_COUNT", "1", 1);
+
+    req.size_bytes = 4096;
+    req.reliability = SSU_RELIABILITY_STRIPE;
+    req.share_type = SSU_SHARE_EXCLUSIVE;
+    req.map_dir = SSU_MAP_DIR_FORWARD;
 
     err = ssu_resource_alloc(&req, &out, extents, &extent_count);
 
@@ -64,10 +64,10 @@ static int test_stripe_alloc_success(void)
 
 static int test_query_elem_size_gate(void)
 {
-    ssu_query_req_t req = {
-        .type = SSU_QUERY_POOL,
-    };
+    ssu_query_req_t req = {};
     uint32_t count = 0;
+
+    req.type = SSU_QUERY_POOL;
 
     return expect_err("query elem size",
                       ssu_resource_query(&req, NULL, sizeof(ssu_logdev_info_t),

@@ -301,14 +301,15 @@ static int refresh_mock_pool(void)
 
 static int print_pool(void)
 {
-    ssu_query_req_t req = {
-        .type = SSU_QUERY_POOL,
-    };
+    ssu_query_req_t req = {};
     uint32_t count = 0;
     ssu_resource_info_t *resources;
     uint32_t i;
-    ssu_err_t err = ssu_resource_query(&req, NULL, sizeof(ssu_resource_info_t),
-                                       &count);
+    ssu_err_t err;
+
+    req.type = SSU_QUERY_POOL;
+    err = ssu_resource_query(&req, NULL, sizeof(ssu_resource_info_t),
+                             &count);
 
     if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
         fprintf(stderr, "query failed: %d\n", err);
@@ -320,7 +321,7 @@ static int print_pool(void)
         return 0;
     }
 
-    resources = calloc(count, sizeof(*resources));
+    resources = (ssu_resource_info_t *)calloc(count, sizeof(*resources));
     if (resources == NULL) {
         fputs("query failed: out of memory\n", stderr);
         return 1;
@@ -349,14 +350,15 @@ static int print_pool(void)
 
 static int print_allocations(void)
 {
-    ssu_query_req_t req = {
-        .type = SSU_QUERY_ALLOCATION,
-    };
+    ssu_query_req_t req = {};
     uint32_t count = 0;
     ssu_allocation_info_t *allocations;
     uint32_t i;
-    ssu_err_t err = ssu_resource_query(&req, NULL,
-                                       sizeof(ssu_allocation_info_t), &count);
+    ssu_err_t err;
+
+    req.type = SSU_QUERY_ALLOCATION;
+    err = ssu_resource_query(&req, NULL, sizeof(ssu_allocation_info_t),
+                             &count);
 
     if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
         fprintf(stderr, "query failed: %d\n", err);
@@ -368,7 +370,8 @@ static int print_allocations(void)
         return 0;
     }
 
-    allocations = calloc(count, sizeof(*allocations));
+    allocations = (ssu_allocation_info_t *)calloc(count,
+                                                  sizeof(*allocations));
     if (allocations == NULL) {
         fputs("query failed: out of memory\n", stderr);
         return 1;
@@ -396,14 +399,14 @@ static int print_allocations(void)
 
 static int print_logdevs(void)
 {
-    ssu_query_req_t req = {
-        .type = SSU_QUERY_LOGDEV,
-    };
+    ssu_query_req_t req = {};
     uint32_t count = 0;
     ssu_logdev_info_t *logdevs;
     uint32_t i;
-    ssu_err_t err = ssu_resource_query(&req, NULL,
-                                       sizeof(ssu_logdev_info_t), &count);
+    ssu_err_t err;
+
+    req.type = SSU_QUERY_LOGDEV;
+    err = ssu_resource_query(&req, NULL, sizeof(ssu_logdev_info_t), &count);
 
     if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
         fprintf(stderr, "query failed: %d\n", err);
@@ -415,7 +418,7 @@ static int print_logdevs(void)
         return 0;
     }
 
-    logdevs = calloc(count, sizeof(*logdevs));
+    logdevs = (ssu_logdev_info_t *)calloc(count, sizeof(*logdevs));
     if (logdevs == NULL) {
         fputs("query failed: out of memory\n", stderr);
         return 1;
@@ -504,12 +507,7 @@ static int write_alloc_output(const char *allocate_id, const char *out_path)
 
 static int cmd_alloc(int argc, char **argv)
 {
-    ssu_alloc_req_t req = {
-        .size_bytes = 0,
-        .reliability = SSU_RELIABILITY_STRIPE,
-        .share_type = SSU_SHARE_EXCLUSIVE,
-        .map_dir = SSU_MAP_DIR_FORWARD,
-    };
+    ssu_alloc_req_t req = {};
     const char *out_path = NULL;
     ssu_alloc_result_t out;
     ssu_alloc_extent_t extents[1];
@@ -518,6 +516,10 @@ static int cmd_alloc(int argc, char **argv)
     char response[RESPONSE_SIZE];
     int i;
     ssu_err_t err;
+
+    req.reliability = SSU_RELIABILITY_STRIPE;
+    req.share_type = SSU_SHARE_EXCLUSIVE;
+    req.map_dir = SSU_MAP_DIR_FORWARD;
 
     for (i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--size") == 0) {
@@ -600,10 +602,7 @@ static int cmd_alloc(int argc, char **argv)
 
 static int cmd_mount(int argc, char **argv)
 {
-    ssu_mount_req_t req = {
-        .allocate_id = NULL,
-        .host_id = NULL,
-    };
+    ssu_mount_req_t req = {};
     char command[256];
     char response[RESPONSE_SIZE];
     int i;
