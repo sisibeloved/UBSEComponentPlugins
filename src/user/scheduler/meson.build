@@ -1,6 +1,6 @@
 libssu_scheduler = shared_library(
   'ssu_scheduler',
-  sources: ['ssu_scheduler.c'],
+  sources: ['ssu_scheduler.cpp'],
   include_directories: inc,
   dependencies: [ssu_headers_dep],
   install: true,

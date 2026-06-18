@@ -540,14 +540,14 @@ static ssu_err_t mock_unmount(const char *logical_dev)
 }
 
 static const ssu_plugin_ops_t ops = {
-    .name = mock_name,
-    .discover = mock_discover,
-    .connect = mock_connect,
-    .health_check = mock_health_check,
-    .create_ns = mock_create_ns,
-    .delete_ns = mock_delete_ns,
-    .mount = mock_mount,
-    .unmount = mock_unmount,
+    mock_name,
+    mock_discover,
+    mock_connect,
+    mock_health_check,
+    mock_create_ns,
+    mock_delete_ns,
+    mock_mount,
+    mock_unmount,
 };
 
 const ssu_plugin_ops_t *ssu_plugin_entry(void)

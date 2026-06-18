@@ -1,6 +1,6 @@
 libssu_api = shared_library(
   'ssu_api',
-  sources: ['ssu_api.c'],
+  sources: ['ssu_api.cpp'],
   include_directories: inc,
   dependencies: [ssu_controller_dep],
   link_with: libssu_plugin_mock,

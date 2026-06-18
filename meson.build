@@ -1,14 +1,16 @@
 project(
   'ubse_ssu',
-  'c',
+  ['c', 'cpp'],
   version: '0.1.0',
   default_options: [
     'c_std=gnu11',
+    'cpp_std=c++17',
     'warning_level=2',
   ],
 )
 
 cc = meson.get_compiler('c')
+cpp = meson.get_compiler('cpp')
 inc = include_directories('include')
 ssu_headers_dep = declare_dependency(include_directories: inc)
 

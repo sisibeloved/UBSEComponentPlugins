@@ -1,6 +1,6 @@
 libssu_plugin_mock = shared_library(
   'ssu_plugin_mock',
-  sources: ['ssu_plugin_mock.c'],
+  sources: ['ssu_plugin_mock.cpp'],
   include_directories: inc,
   dependencies: [ssu_headers_dep],
   install: true,

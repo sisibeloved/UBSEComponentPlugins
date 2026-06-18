@@ -1,6 +1,6 @@
 libssu_controller = shared_library(
   'ssu_controller',
-  sources: ['ssu_controller.c'],
+  sources: ['ssu_controller.cpp'],
   include_directories: inc,
   dependencies: [ssu_headers_dep],
   install: true,
