@@ -18,7 +18,7 @@
 - [构建](#构建)
 - [测试与验收](#测试与验收)
 - [运行时角色与 CLI](#运行时角色与-cli)
-- [上游 `ubs-engine` 如何使用本组件](#上游-ubs-engine-如何使用本组件)
+- [上游业务系统（UBS IO）如何使用本组件](#上游业务系统ubs-io如何使用本组件)
 - [项目状态（MVP）](#项目状态mvp)
 - [设计文档](#设计文档)
 - [路线图（MVP 之后）](#路线图mvp-之后)
@@ -37,8 +37,8 @@
 
 **关键特点**
 
-- **独立交付**：用户态 `.so` + 内核态 `.ko`，与上游 `ubs-engine` 构建解耦，运行期加载。
-- **可脱离 UBSE 独立验证**：内置 mock plugin（`null_blk` / 文件后端）与 UBS IO 替身 `ssu_smoke`，无需真实 SSU / LBC INI / 上游 daemon 即可跑通全链路验收。
+- **独立交付**：用户态 `.so` + 内核态 `.ko`，与 `ubs-engine` 构建解耦，由 daemon 运行期加载。
+- **可脱离 UBSE 独立验证**：内置 mock plugin（`null_blk` / 文件后端）与 UBS IO 替身 `ssu_smoke`，无需真实 SSU / LBC INI / 上游业务系统 / ubse daemon 即可跑通全链路验收。
 - **能力门控前置**：REPLICA / EC / NDS / 多流在当前阶段请求一律返回 `SSU_ERR_UNSUPPORTED`，不静默降级。
 
 > ℹ️ 外部邻居 **UBS IO**（上层，含 KV Cache）与 **LBC INI**（下层）不在本仓库交付范围内，但定义了组件的上下边界。
@@ -217,98 +217,108 @@ ubsectl query   --type pool|allocation|logdev
 
 ---
 
-## 上游 `ubs-engine` 如何使用本组件
+## 上游业务系统（UBS IO）如何使用本组件
 
-本组件以**用户态 `.so` + 内核态 `.ko`** 独立交付，与上游 `ubs-engine` **不共享构建系统、不共享源码树**。上游 daemon 通过两条路径接入：**作为插件被加载**、**作为 SDK 客户端调用**。
+> 这里的"上游"指**消费逻辑块设备的业务存储系统**，典型代表是 **UBS IO（含 KV Cache）**：它们是 `/dev/ssuN` 的数据面消费者，也是 `libubse` SDK / `ubsectl` 的调用方。本节说明业务方拿到交付件后如何接入。
 
-### 1. 安装交付件
+业务系统与本组件通过两条面交互（设计 §2.1）：**控制面**（调 SSU API 申请/挂载/释放空间）、**数据面**（对 `/dev/ssuN` 做块 I/O）。此外 UBS IO 还会在**集群节点扩缩容**时主动调 API（见下文）。
+
+### 前置：部署上下文
+
+业务方所在节点的底层已由平台运维就位，业务方**无需关心**，只需知道两件事：
+
+- 本组件已在节点上运行（由 `ubs-engine` daemon 托管，或独立 `ssu-agent`），提供控制面服务，监听 Unix socket（路径经 `SSU_MGR_SOCKET` 指定）。
+- 内核侧 `ssu_reqshim.ko` 已加载（`/dev/ssu-ctrl` 在），业务方挂载成功后会出现 `/dev/ssuN` 逻辑块设备。
+
+### 步骤 1：链接 SDK / 准备 CLI
+
+业务方**只需** `libssu_api.so`（导出 `libubse` SDK）与头文件 `ssu_api.h`：
 
 ```bash
-# 构建并安装（以 mock 为例，真实厂商替换 vendor）
-meson setup build -Dvendor=mock -Dbuild_kernel=enabled \
-    -Dkernel_src_dir=/lib/modules/$(uname -r)/build
-ninja -C build && sudo ninja -C build install
-sudo depmod -a                       # 让 modprobe 能找到 .ko
+# 编译业务程序
+gcc my_app.c -o my_app -lssu_api
+# 或管理脚本用 ubsectl（无需编码）
 ```
 
-安装后产物落位（§8.5）：
+5 类操作（`ssu_resource_alloc` / `mount` / `unmount` / `release` / `query`）、数据结构、错误码、能力门控语义见 `ssu_api.h` 与设计文档 §3。
 
-| 产物 | 路径 | 用途 |
-| ---- | ---- | ---- |
-| `libssu_api.so` + 头文件 | `/usr/lib`、`/usr/include` | UBS IO / 业务链接 `libubse` SDK |
-| `libssu_controller.so`、`libssu_scheduler.so` | `/usr/lib/ubs-engine` | daemon 加载 |
-| `libssu_plugin_*.so` | `/usr/lib/ubs-engine/ssu` | 厂商 plugin（进程内 dlopen） |
-| `ssu_reqshim.ko` | `/lib/modules/<kver>/extra/` | 内核模块 |
-| `ssu.conf`、`ubse-ssu.service` | `/etc/ubs-engine/`、systemd unit | 配置与托管 |
+### 步骤 2：控制面 —— 申请、挂载、读写、归还
 
-### 2. 路径 A：上游 daemon 作为插件加载本组件
-
-上游 daemon 经其既有 `framework/plugin_mgr` 机制，在运行期 `dlopen` 本组件用户态库，并按 `ssu.conf` 的 `role` 把本组件作为 **Manager / Agent 角色装配进 daemon 进程**：
-
-```ini
-# /etc/ubs-engine/ssu.conf
-role=manager          # 管理节点：manager；业务宿主机：agent
-vendor=<vendor>       # mock | <厂商>
-plugin_dir=/usr/lib/ubs-engine/ssu
-```
-
-```
-┌──────── ubse daemon (上游) ────────┐
-│ framework/plugin_mgr ──dlopen──► 本组件用户态 .so（API/Controller/）
-│                                  │   Scheduler/Plugin），按 role 装配
-│                                  │
-│                                  ▼ 加载 ReqShim：
-│                                 modprobe ssu_reqshim.ko
-└──────────────────────────────────┼─────────────────────────────┘
-                                   ▼
-                       ┌── 内核 ssu_reqshim.ko ──┐
-                       │ /dev/ssuN 逻辑块设备     │
-                       │ NVMe 命令转换/扇出       │
-                       └─────────────────────────┘
-```
-
-- 用户态库被加载后，本组件的 Controller/Scheduler/Plugin 即在 daemon 进程内运行；本组件自带 `ssu-mgr`/`ssu-agent` 入口在**独立自验**时使用，接入上游后由 daemon 托管生命周期（`ubse-ssu.service`）。
-- 内核侧 ReqShim 由 daemon（Agent 角色节点）`modprobe ssu_reqshim` 加载，加载后出现控制设备 `/dev/ssu-ctl`；本组件经其 ioctl（`SSU_IOC_LOGDEV_CREATE`/`MAP_ADD` 等 UAPI）建/拆逻辑设备与映射。
-
-### 3. 路径 B：上游 / UBS IO 作为 SDK 客户端调用
-
-UBS IO、业务系统或管理员**链接 `libubse` SDK**（或用 `ubsectl` CLI）调 5 类操作，经 Unix-socket RPC 路由到 Controller（Agent 本地可决的 mount/unmount 在本节点处理；alloc/release/query 等全局动作上送 Manager）：
+典型生命周期（程序化）：
 
 ```c
 #include "ssu_api.h"
 
-ssu_alloc_req_t req = { .size_bytes = 1ULL<<30,
+/* ① 申请空间（在组件 SSU 上建 namespace，返回 allocate_id） */
+ssu_alloc_req_t req = { .size_bytes  = 1ULL << 30,
                         .reliability = SSU_RELIABILITY_STRIPE,
                         .share_type  = SSU_SHARE_EXCLUSIVE };
-ssu_alloc_result_t  out;
-ssu_alloc_extent_t  extents[8];
-uint32_t            n = 8;
-
+ssu_alloc_result_t out;
+ssu_alloc_extent_t extents[8];
+uint32_t           n = 8;
 if (ssu_resource_alloc(&req, &out, extents, &n) == SSU_ERR_BUFFER_TOO_SMALL) {
-    /* 扩容 extents 后重试 */
+    /* 扩容 extents 数组后重试（n 已被改写为所需数量） */
 }
 
+/* ② 挂载到本节点（建 /dev/ssu0 + 写映射） */
 ssu_mount_req_t m = { .allocate_id = out.allocate_id,
-                      .host_id = "node-1", .logical_dev = "/dev/ssu0" };
+                      .host_id     = "node-1",
+                      .logical_dev = "/dev/ssu0" };
 ssu_resource_mount(&m);
-/* 此后对 /dev/ssu0 的 read/write 即数据面 I/O */
+
+/* ③ 数据面：对 /dev/ssu0 的标准 read/write 即业务 I/O，
+      内核 ReqShim 自动做命令转换并下发到 SSU */
+int fd = open("/dev/ssu0", O_RDWR);
+write(fd, buf, len);   /* 读写在业务侧就是普通块设备操作 */
+
+/* ④ 归还（两种语义，二选一） */
+ssu_resource_unmount("/dev/ssu0");   /* 解挂载：保留数据，可再 mount 或迁移 */
+ssu_resource_release(out.allocate_id); /* 释放：先擦数据再删 namespace，彻底归还 */
 ```
 
-> 调用方进程需能访问 Manager 的 Unix socket（路径由 `SSU_MGR_SOCKET` 指定，或经 `ubsectl` 透传）。
+等价的命令行（运维/排查）：
 
-### 4. 真实联调：把 mock 桩换成真实依赖
+```bash
+ubsectl alloc   --size 1G --stripe --share exclusive --out aid
+ubsectl mount   --aid "$aid" --host node-1 --dev /dev/ssu0
+# … 业务读写 /dev/ssu0 …
+ubsectl unmount --dev /dev/ssu0
+ubsectl release --aid "$aid"
+ubsectl query   --type pool|allocation|logdev    # 查资源池/分配明细/逻辑设备映射
+```
 
-上游接入时无需改动本组件代码，仅替换运行依赖：
+### 步骤 3：集群节点扩缩容（UBS IO 作为控制面参与者）
 
-| mock 桩（自验） | 真实依赖（联调） |
+UBS IO 不只是数据面消费者——集群节点扩容/缩容时，**新节点或缩节点的 UBS IO 主动调 API**（带 `allocate_id`，作用于共享逻辑块设备）：
+
+```c
+/* 节点扩容：新节点 mount 已分配的共享 namespace，获得本地 /dev/ssuN 访问路径 */
+ssu_resource_mount(&m);   /* 同一 allocate_id，数据共享 */
+
+/* 节点缩容：本节点 unmount，只拆本机访问路径、数据保留、其他节点不受影响 */
+ssu_resource_unmount("/dev/ssu0");
+```
+
+> 多节点共享 namespace 的写一致性 / fencing 由**业务系统**保证，本组件只负责访问路径的增删（设计 §4.2.7）。
+
+### 能力边界（业务方需知）
+
+- **MVP 仅支持 `SSU_RELIABILITY_STRIPE` + 普通读写**；请求 `REPLICA`/`EC`/NDS/多流一律返回 `SSU_ERR_UNSUPPORTED`，不静默降级（设计 §3.3）。
+- **两步释放语义**：`unmount` 保留数据（节点缩容/迁移/临时下线），`release` 物理擦除（业务彻底归还），不可混用（设计 §3.4）。
+- **查询是最近一致视图**：`query` 返回运行期内存视图，强一致判断需结合实际 I/O（设计 §7.3）。
+
+### 真实联调：业务方对照验收
+
+业务方接入后，可用本组件**同一套验收脚本**对照验证（先把平台侧 mock 桩替换为真实 SSU/LBC INI）：
+
+| mock 桩（平台自验） | 真实依赖（业务联调） |
 | ---- | ---- |
 | `null_blk` / 文件后端 | 真实 SSU 硬件 |
-| mock plugin（`vendor=mock`） | 厂商 plugin（`vendor=<vendor>`） |
+| mock plugin | 厂商 plugin |
 | `ssu_smoke`（UBS IO 替身） | 真实 UBS IO / KV Cache |
-| 本组件自带 `ssu-mgr`/`ssu-agent` | 上游 ubse daemon 托管 |
-| ReqShim 数据面 `reqshim_phys` mock 路径（bio 重映射） | 真实 NVMe request → LBC INI → URMA 路径 |
+| `reqshim_phys` mock 路径（bio 重映射） | 真实 NVMe request → LBC INI → URMA |
 
-替换后**跑同一套 `tests/mvp*/check.sh` 验收脚本**即可对照验证联调结果。
+替换后跑 `tests/mvp4/check.sh`（SDK 全链路）即可验证业务方读写闭环。
 
 ---
 
@@ -325,7 +335,7 @@ MVP 目标是**脱离 UBSE 独立验证**核心闭环：控制面（发现纳管
 | MVP-4 | SDK 全链路（`ssu_smoke`） | ✅ |
 | MVP-5 | 扩缩容（共享 namespace 节点路径增删） | ✅ |
 
-> MVP 阶段所有验收均基于 mock 桩（`null_blk` / 文件后端 / `ssu_smoke`），不依赖真实 SSU、LBC INI、UBS IO 或上游 ubse daemon。真实联调时把桩替换为真实依赖，跑同一套验收脚本即可。
+> MVP 阶段所有验收均基于 mock 桩（`null_blk` / 文件后端 / `ssu_smoke`），不依赖真实 SSU、LBC INI、上游业务系统（UBS IO）或 ubse daemon。真实联调时把桩替换为真实依赖，跑同一套验收脚本即可。
 
 ---
 
@@ -333,7 +343,7 @@ MVP 目标是**脱离 UBSE 独立验证**核心闭环：控制面（发现纳管
 
 - [详细实现设计](docs/design/implementation-design.md) —— 架构、5 操作 API、各模块详设、与 OS / LBC INI 的逐接口契约、里程碑、风险。
 - [MVP 实现计划](docs/design/mvp-implementation-plan.md) —— 脱离 UBSE 独立验证的桩化策略、MVP-0~5 分解与脚本化验收。
-- 上游依据：[架构设计 Issue #1](https://github.com/sisibeloved/UBSEComponentPlugins/issues/1)、[功能设计 Issue #2](https://github.com/sisibeloved/UBSEComponentPlugins/issues/2)。
+- 设计依据：[架构设计 Issue #1](https://github.com/sisibeloved/UBSEComponentPlugins/issues/1)、[功能设计 Issue #2](https://github.com/sisibeloved/UBSEComponentPlugins/issues/2)。
 
 ---
 
@@ -345,7 +355,7 @@ MVP 目标是**脱离 UBSE 独立验证**核心闭环：控制面（发现纳管
 | M7 | 多流（NVMe stream-ID 热/冷分离） |
 | M8 | 多副本扇出 + EC 编码 |
 | M9 | Scheduler 评分 / 带宽预留 / 跨节点亲和 |
-| M10 | 对账收敛、重启重建、可观测性、plugin 进程级隔离、接入上游 ubse daemon |
+| M10 | 对账收敛、重启重建、可观测性、plugin 进程级隔离、接入 ubse daemon 托管 |
 
 详见设计文档 §12.2。
 
