@@ -1,6 +1,6 @@
 option('combine_core', type: 'boolean', value: false,
   description: 'Build a combined core library in a later stage')
-option('vendor', type: 'combo', choices: ['mock'], value: 'mock',
+option('vendor', type: 'combo', choices: ['mock', 'lbc_mock'], value: 'mock',
   description: 'Vendor plugin to build')
 option('build_kernel', type: 'feature', value: 'disabled',
   description: 'Build the out-of-tree ReqShim kernel module')

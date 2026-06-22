@@ -6,7 +6,7 @@ executable(
     ssu_api_dep,
     ssu_controller_dep,
   ],
-  link_with: libssu_plugin_mock,
+  link_with: ssu_plugin_lib,
   install: true,
   install_dir: get_option('sbindir'),
 )
