@@ -359,6 +359,13 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
         return SSU_ERR_NO_RESOURCE;
     }
 
+    if (req->physical_disk_count > 0) {
+        if (req->physical_disk_count > extent_count) {
+            return SSU_ERR_NO_RESOURCE;
+        }
+        extent_count = req->physical_disk_count;
+    }
+
     if ((uint64_t)extent_count > req->size_bytes) {
         extent_count = (uint32_t)req->size_bytes;
     }

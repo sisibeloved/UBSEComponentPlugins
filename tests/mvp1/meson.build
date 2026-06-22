@@ -4,4 +4,5 @@ test(
   'mvp1_check',
   check,
   args: [meson.project_build_root(), meson.project_source_root()],
+  depends: [ubsectl],
 )

@@ -1,4 +1,4 @@
-executable(
+ubsectl = executable(
   'ubsectl',
   sources: ['ubsectl.cpp'],
   include_directories: inc,

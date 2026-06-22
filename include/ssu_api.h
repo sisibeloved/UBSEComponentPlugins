@@ -27,6 +27,7 @@ typedef enum {
 typedef struct {
     uint64_t size_bytes;
     uint64_t io_bandwidth_bps;
+    uint32_t physical_disk_count;
     ssu_reliability_t reliability;
     uint32_t replica_count;
     uint32_t ec_data;
@@ -103,10 +104,12 @@ typedef struct {
     uint64_t phys_sector;
 } ssu_logdev_info_t;
 
+#define SSU_API_MAX_PHYSICAL_DISKS 128U
+
 typedef struct {
     uint64_t size_bytes;
-    const char *tenant_id;
-    uint32_t shard_count;
+    const char *user_id;
+    uint32_t physical_disk_count;
     int logical_disk_aggregate;
     ssu_share_type_t allocation_type;
     const char *const *host_ids;
@@ -132,8 +135,18 @@ typedef enum {
 } ssu_err_t;
 
 typedef struct {
+    char ssu_id[64];
+    char ns_id[32];
+    uint64_t logical_offset;
+    uint64_t length;
+    uint64_t lba;
+} ssu_api_physical_lba_t;
+
+typedef struct {
     ssu_err_t status;
     char device_path[64];
+    uint32_t physical_disk_count;
+    ssu_api_physical_lba_t physical_disks[SSU_API_MAX_PHYSICAL_DISKS];
     char error_message[128];
 } ssu_api_allocate_result_info_t;
 

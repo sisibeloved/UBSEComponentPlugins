@@ -1,6 +1,6 @@
 # ubsectl + LBC mock 集成手册
 
-这份文档给“只想在自己的系统里调用 `ubsectl` 做测试”的集成方看。
+这份文档给“只想在自己的系统里调用 `ubsectl` 做测试”的集成方看。需要直接接 SDK 的系统，可以参考后面的 C++ SDK 字段示例。
 
 你不需要直接运行 LBC mock 的脚本，也不需要理解 SSU Plugin 的内部实现。正确用法是：
 
@@ -52,15 +52,15 @@ sudo ./build-lbc/tools/ubsectl list
 
 sudo ./build-lbc/tools/ubsectl allocate \
     --size 512M \
-    --tenant tenant-demo \
-    --shards 1 \
-    --aggregate \
+    --user user-demo \
     --share exclusive \
     --host local \
     --out /tmp/ssu-rid
 
 RID=$(cat /tmp/ssu-rid)
-DEV=$(sudo ./build-lbc/tools/ubsectl allocate-result-get --request-id "$RID")
+RESULT=$(sudo ./build-lbc/tools/ubsectl allocate-result-get --request-id "$RID")
+DEV=$(printf '%s\n' "$RESULT" | sed -n '1p')
+printf '%s\n' "$RESULT"
 
 sudo ./build-lbc/tools/ubsectl mount \
     --dev "$DEV" \
@@ -81,6 +81,48 @@ port=4420
 subnqn=nqn.2025-01.io.ssu:m0
 nsze=1048576
 log_file=/tmp/ubse-lbc-mock.log
+physical_disk_count=0  # allocate 默认单张物理盘
+logical_disk_aggregate=on
+```
+
+## 逻辑 API 参数怎么理解
+
+`ubsectl allocate` 对应逻辑接口 `INTF_SSU_API_ALLOCATE`。快速验证时推荐这样传：
+
+```bash
+sudo ./build-lbc/tools/ubsectl allocate \
+    --size 512M \
+    --user user-demo \
+    --share exclusive \
+    --host local \
+    --out /tmp/ssu-rid
+```
+
+这些参数的含义是：
+
+- `--size`：逻辑盘大小，不是单张物理盘大小。
+- `--user`：逻辑盘的用户归属标签。租户隔离、用户权限、Host 是否允许访问，都由上游业务系统判断，本组件不做业务校验。
+- `--physical-disks N`：手动指定使用几张物理盘。不传时等价于默认单张物理盘。
+- `--aggregate`：逻辑盘聚合开关，默认打开，通常不用显式传。
+- `--no-aggregate`：当前 MVP 不支持，会返回 `SSU_ERR_UNSUPPORTED`。
+- `--share exclusive|shared`：独占盘给一个 Host，共享盘给 Host 列表。
+- `--host`：独占盘是使用该盘的 Host；共享盘可以传多次，表示共享范围内的 Host 列表。
+
+老参数 `--tenant`、`--shards` 仍作为兼容别名保留，但新集成建议使用 `--user`、`--physical-disks`。
+
+`allocate-result-get` 的输出是多行。第一行是后续 `mount/free` 使用的逻辑设备路径，后面每一行是物理盘 LBA 明细：
+
+```text
+/dev/ssu0
+physical 0 lbc-mock-ssu0 1 0 536870912 lba=0
+```
+
+脚本里不要再把整个输出都当成设备路径。推荐这样取第一行：
+
+```bash
+RESULT=$(sudo ./build-lbc/tools/ubsectl allocate-result-get --request-id "$RID")
+DEV=$(printf '%s\n' "$RESULT" | sed -n '1p')
+printf '%s\n' "$RESULT"
 ```
 
 ## SSU_MGR_SOCKET 是什么
@@ -215,14 +257,14 @@ pool entries: 1
 lbc-mock-ssu0 lbc-mock-host0 ONLINE 0/536870912
 ```
 
+当前 LBC mock 快速路径默认只发现一个 `lbc-mock-ssu0`，所以这里的主流程不要传 `--physical-disks 2`。多物理盘逻辑见后面的“多物理盘和数据面验证”。
+
 申请 512 MiB 空间：
 
 ```bash
 sudo ./build-lbc/tools/ubsectl allocate \
     --size 512M \
-    --tenant tenant-demo \
-    --shards 1 \
-    --aggregate \
+    --user user-demo \
     --share exclusive \
     --host local \
     --out /tmp/ssu-rid
@@ -230,18 +272,22 @@ sudo ./build-lbc/tools/ubsectl allocate \
 RID=$(cat /tmp/ssu-rid)
 ```
 
-获取这次分配对应的逻辑设备路径：
+获取这次分配对应的逻辑设备路径和物理盘 LBA 明细：
 
 ```bash
-DEV=$(sudo ./build-lbc/tools/ubsectl allocate-result-get --request-id "$RID")
-echo "$DEV"
+RESULT=$(sudo ./build-lbc/tools/ubsectl allocate-result-get --request-id "$RID")
+DEV=$(printf '%s\n' "$RESULT" | sed -n '1p')
+printf '%s\n' "$RESULT"
 ```
 
 输出类似：
 
 ```text
 /dev/ssu0
+physical 0 lbc-mock-ssu0 1 0 536870912 lba=0
 ```
+
+`physical` 行字段依次是：序号、SSU ID、namespace ID、逻辑偏移、长度、物理起始 LBA。
 
 挂载成逻辑设备：
 
@@ -298,6 +344,98 @@ ls /sys/kernel/config/nvmet/subsystems/nqn.2025-01.io.ssu:m0/namespaces/
 
 期望刚才创建的 `/dev/nvmeXnY` 和 namespace `1` 已经消失。
 
+## C++ SDK 最小示例
+
+用户态集成也可以直接调 SDK。下面示例只展示逻辑 API 字段怎么填，以及分配、取结果、挂载、解挂载、释放的调用顺序；LBC mock 快速联调仍建议先用前面的 `ubsectl + ssu-mgr` 路径跑通。
+
+```cpp
+#include "ssu_api.h"
+
+#include <cstdio>
+
+int main()
+{
+    const char *hosts[] = {"local"};
+    ssu_api_allocate_req_t req = {};
+    ssu_api_allocate_resp_t resp = {};
+    ssu_api_allocate_result_info_t result = {};
+
+    req.size_bytes = 512ULL * 1024ULL * 1024ULL;
+    req.user_id = "user-demo";
+    req.physical_disk_count = 0;       // 默认单张物理盘
+    req.logical_disk_aggregate = 0;    // 默认打开聚合
+    req.allocation_type = SSU_SHARE_EXCLUSIVE;
+    req.host_ids = hosts;
+    req.host_count = 1;
+
+    ssu_err_t err = ssu_api_allocate(&req, &resp);
+    if (err != SSU_OK) {
+        std::printf("allocate failed: %d\n", err);
+        return 1;
+    }
+
+    err = ssu_api_allocate_result_get(resp.request_id, &result);
+    if (err != SSU_OK) {
+        std::printf("allocate-result-get failed: %d %s\n",
+                    err, result.error_message);
+        return 1;
+    }
+
+    std::printf("device=%s\n", result.device_path);
+    for (uint32_t i = 0; i < result.physical_disk_count; i++) {
+        const ssu_api_physical_lba_t &disk = result.physical_disks[i];
+        std::printf("physical %u %s %s %llu %llu lba=%llu\n",
+                    i,
+                    disk.ssu_id,
+                    disk.ns_id,
+                    (unsigned long long)disk.logical_offset,
+                    (unsigned long long)disk.length,
+                    (unsigned long long)disk.lba);
+    }
+
+    err = ssu_api_mount(result.device_path, "local");
+    if (err != SSU_OK) {
+        std::printf("mount failed: %d\n", err);
+        return 1;
+    }
+
+    ssu_api_unmount(result.device_path);
+    ssu_api_free(result.device_path);
+    return 0;
+}
+```
+
+## 多物理盘和数据面验证
+
+多物理盘分配使用 `--physical-disks N`：
+
+```bash
+sudo ./build-lbc/tools/ubsectl allocate \
+    --size 8192 \
+    --user user-demo \
+    --physical-disks 2 \
+    --host local \
+    --out /tmp/ssu-rid
+```
+
+成功后 `allocate-result-get` 会返回多条 `physical` 行；`mount` 后 `query --type logdev` 也会看到同一个 `/dev/ssuN` 对应多条物理映射。
+
+不过当前 LBC mock 插件默认只发现一个 `lbc-mock-ssu0`，所以这条命令在 LBC mock 快速路径下会因为物理盘不足返回 `SSU_ERR_NO_RESOURCE`。多物理盘控制面和用户态数据面目前用默认 mock 验收：
+
+```bash
+meson test -C build mvp2_check --print-errorlogs
+meson test -C build mvp3_check --print-errorlogs
+meson test -C build mvp4_check --print-errorlogs
+```
+
+其中：
+
+- `mvp2_check` 验证 `--physical-disks 2`、两条物理 LBA、两条 `logdev` 映射。
+- `mvp3_check` 验证挂载后通过 `ssu_smoke` 做用户态数据面读写。
+- `mvp4_check` 验证 SDK 驱动的分配、挂载、读写、解挂载、释放闭环。
+
+这三项使用 mock 后端文件模拟物理设备，不等同于 LBC mock 的真实 `/dev/nvmeXnY -> /dev/ssuN` 内核数据面闭环。LBC mock 快速路径当前主要验证控制面：create/attach 后出现 `/dev/nvmeXnY`，mount 后有逻辑映射，free 后 detach/delete。
+
 ## 失败时怎么看
 
 `ubsectl` 现在会返回错误名和提示，不只返回数字。例如：
@@ -315,6 +453,15 @@ sudo tail -n 50 /tmp/ubse-lbc-mock.log
 ```
 
 同时也看启动 `ssu-mgr` 的那个终端。插件会把脚本执行命令、前缀目录、dev 目录、脚本退出码、找不到 NVMe namespace 等信息写到那里。
+
+常见错误可以先按下面判断：
+
+| 错误 | 常见原因 | 处理方式 |
+| ---- | ---- | ---- |
+| `SSU_ERR_NO_RESOURCE` | `--physical-disks N` 超过当前可用物理盘，或池里没有 ONLINE 资源 | 先 `ubsectl list` 看资源数；LBC mock 默认只有 1 个 SSU |
+| `SSU_ERR_UNSUPPORTED` | 使用了 `--no-aggregate`，或请求了当前阶段未启用能力 | 快速验证保持默认聚合；未启用能力不要当成成功路径 |
+| `SSU_ERR_NOT_FOUND` | request id、设备路径、namespace 或 LBC mock 生成的 `/dev/nvmeXnY` 找不到 | 检查 `RID`、`DEV` 是否取对，查看 `query --type logdev` 和 `/tmp/ubse-lbc-mock.log` |
+| `mount/free` 参数异常 | 老脚本把 `allocate-result-get` 的多行输出整体当成设备路径 | 用 `sed -n '1p'` 只取第一行作为 `DEV` |
 
 ## 可选配置文件
 
@@ -359,14 +506,14 @@ sudo bash mock/run_mock.sh ./sample_detach_delete ...
 当前这条 LBC mock 集成路径验证的是控制面：
 
 - `ubsectl allocate` 触发 LBC mock create + attach，并返回请求 ID。
-- `ubsectl allocate-result-get` 根据请求 ID 返回 `/dev/ssuN` 逻辑设备路径。
+- `ubsectl allocate-result-get` 根据请求 ID 返回 `/dev/ssuN` 逻辑设备路径，并返回每张物理盘对应的 `ssu_id/ns_id/逻辑偏移/长度/LBA`。
 - `ubsectl mount` 建立 `/dev/ssuN -> /dev/nvmeXnY` 的逻辑映射。
 - `ubsectl unmount` 删除逻辑映射。
 - `ubsectl free` 触发 LBC mock detach + delete。
 
 也就是说，现在可以用它验证“上游只调 `ubsectl`，底层出现并删除 `/dev/nvmeXnY`”。
 
-真正对 `/dev/ssu0` 发起数据读写，需要 ReqShim 数据面接入后一起验证。LBC mock 本身已经能产生 `/dev/nvmeXnY`，但 `/dev/ssu0` 这个逻辑块设备不是 LBC mock 脚本创建的。
+真正对 `/dev/ssu0` 发起数据读写，需要 ReqShim 数据面接入后一起验证。LBC mock 本身已经能产生 `/dev/nvmeXnY`，但当前 LBC mock 快速路径里的 `/dev/ssu0` 逻辑块设备不是 LBC mock 脚本创建的。
 
 ## 常见问题
 

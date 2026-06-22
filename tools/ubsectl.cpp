@@ -18,7 +18,7 @@
 static void usage(void)
 {
     puts("usage: ubsectl <allocate|free|list|allocate-result-get|mount|unmount>");
-    puts("       ubsectl allocate --size BYTES [--tenant TENANT] [--shards N] [--aggregate|--no-aggregate] [--share exclusive|shared] [--host HOST] [--out FILE]");
+    puts("       ubsectl allocate --size BYTES [--user USER] [--physical-disks N] [--aggregate|--no-aggregate] [--share exclusive|shared] [--host HOST] [--out FILE]");
     puts("       ubsectl allocate-result-get --request-id ID [--out FILE]");
     puts("       ubsectl free --dev /dev/ssuN");
     puts("       ubsectl list");
@@ -630,6 +630,32 @@ static int write_alloc_output(const char *allocate_id, const char *out_path)
     return 0;
 }
 
+static int print_allocate_result(const ssu_api_allocate_result_info_t *result,
+                                 const char *out_path)
+{
+    uint32_t i;
+
+    if (write_alloc_output(result->device_path, out_path) != 0) {
+        return 1;
+    }
+
+    if (out_path != NULL) {
+        printf("%s\n", result->device_path);
+    }
+
+    for (i = 0; i < result->physical_disk_count; i++) {
+        printf("physical %u %s %s %llu %llu lba=%llu\n",
+               i,
+               result->physical_disks[i].ssu_id,
+               result->physical_disks[i].ns_id,
+               (unsigned long long)result->physical_disks[i].logical_offset,
+               (unsigned long long)result->physical_disks[i].length,
+               (unsigned long long)result->physical_disks[i].lba);
+    }
+
+    return 0;
+}
+
 static int cmd_allocate(int argc, char **argv)
 {
     ssu_api_allocate_req_t req = {};
@@ -637,14 +663,14 @@ static int cmd_allocate(int argc, char **argv)
     const char *hosts[MAX_CLI_HOSTS];
     uint32_t host_count = 0;
     const char *out_path = NULL;
-    const char *tenant = "default";
+    const char *user = "default";
     char host_list[256];
     char command[512];
     char response[RESPONSE_SIZE];
     int i;
     ssu_err_t err;
 
-    req.shard_count = 1;
+    req.physical_disk_count = 0;
     req.logical_disk_aggregate = 1;
     req.allocation_type = SSU_SHARE_EXCLUSIVE;
 
@@ -659,21 +685,25 @@ static int cmd_allocate(int argc, char **argv)
             continue;
         }
 
-        if (strcmp(argv[i], "--tenant") == 0) {
+        if (strcmp(argv[i], "--user") == 0 ||
+            strcmp(argv[i], "--tenant") == 0) {
             if (i + 1 >= argc || is_empty_string(argv[i + 1])) {
                 usage();
                 return 1;
             }
-            tenant = argv[++i];
+            user = argv[++i];
             continue;
         }
 
-        if (strcmp(argv[i], "--shards") == 0) {
+        if (strcmp(argv[i], "--physical-disks") == 0 ||
+            strcmp(argv[i], "--phys-disks") == 0 ||
+            strcmp(argv[i], "--shards") == 0) {
             if (i + 1 >= argc) {
                 usage();
                 return 1;
             }
-            req.shard_count = (uint32_t)strtoul(argv[i + 1], NULL, 10);
+            req.physical_disk_count =
+                (uint32_t)strtoul(argv[i + 1], NULL, 10);
             i++;
             continue;
         }
@@ -684,7 +714,7 @@ static int cmd_allocate(int argc, char **argv)
         }
 
         if (strcmp(argv[i], "--no-aggregate") == 0) {
-            req.logical_disk_aggregate = 0;
+            req.logical_disk_aggregate = -1;
             continue;
         }
 
@@ -725,7 +755,7 @@ static int cmd_allocate(int argc, char **argv)
         hosts[host_count++] = "local";
     }
 
-    req.tenant_id = tenant;
+    req.user_id = user;
     req.host_ids = hosts;
     req.host_count = host_count;
 
@@ -738,9 +768,9 @@ static int cmd_allocate(int argc, char **argv)
         snprintf(command, sizeof(command), "ALLOCATE %llu %d %u %d %s %s",
                  (unsigned long long)req.size_bytes,
                  (int)req.allocation_type,
-                 req.shard_count,
+                 req.physical_disk_count,
                  req.logical_disk_aggregate,
-                 is_empty_string(tenant) ? "-" : tenant,
+                 is_empty_string(user) ? "-" : user,
                  host_list);
         if (!manager_request(command, response, sizeof(response))) {
             return 1;
@@ -813,7 +843,7 @@ static int cmd_allocate_result_get(int argc, char **argv)
         return 1;
     }
 
-    return write_alloc_output(result.device_path, out_path);
+    return print_allocate_result(&result, out_path);
 }
 
 static int cmd_alloc(int argc, char **argv)
@@ -831,6 +861,7 @@ static int cmd_alloc(int argc, char **argv)
     req.reliability = SSU_RELIABILITY_STRIPE;
     req.share_type = SSU_SHARE_EXCLUSIVE;
     req.map_dir = SSU_MAP_DIR_FORWARD;
+    req.physical_disk_count = 1;
 
     for (i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--size") == 0) {

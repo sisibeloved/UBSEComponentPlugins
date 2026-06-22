@@ -1,6 +1,6 @@
 runtime_deps = [ssu_api_dep, ssu_controller_dep, ssu_scheduler_dep]
 
-executable(
+ssu_mgr = executable(
   'ssu-mgr',
   sources: ['ssu_runtime.cpp'],
   include_directories: inc,
@@ -11,7 +11,7 @@ executable(
   install_dir: get_option('sbindir'),
 )
 
-executable(
+ssu_agent = executable(
   'ssu-agent',
   sources: ['ssu_runtime.cpp'],
   include_directories: inc,

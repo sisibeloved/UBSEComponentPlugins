@@ -398,6 +398,7 @@ static ssu_err_t handle_alloc(char *save, char *body, size_t n)
 
     memset(&req, 0, sizeof(req));
     req.size_bytes = (uint64_t)strtoull(size_s, NULL, 10);
+    req.physical_disk_count = 1;
     req.reliability = (ssu_reliability_t)strtol(reliability_s, NULL, 10);
     req.replica_count = (uint32_t)strtoul(replica_s, NULL, 10);
     req.share_type = (ssu_share_type_t)strtol(share_s, NULL, 10);
@@ -420,9 +421,9 @@ static ssu_err_t handle_allocate(char *save, char *body, size_t n)
 {
     char *size_s = strtok_r(NULL, " ", &save);
     char *share_s = strtok_r(NULL, " ", &save);
-    char *shards_s = strtok_r(NULL, " ", &save);
+    char *physical_disks_s = strtok_r(NULL, " ", &save);
     char *aggregate_s = strtok_r(NULL, " ", &save);
-    char *tenant_s = strtok_r(NULL, " ", &save);
+    char *user_s = strtok_r(NULL, " ", &save);
     char *hosts_s = strtok_r(NULL, " ", &save);
     const char *hosts[32];
     char *host_save = NULL;
@@ -431,8 +432,8 @@ static ssu_err_t handle_allocate(char *save, char *body, size_t n)
     ssu_api_allocate_resp_t result;
     ssu_err_t err;
 
-    if (size_s == NULL || share_s == NULL || shards_s == NULL ||
-        aggregate_s == NULL || tenant_s == NULL || hosts_s == NULL) {
+    if (size_s == NULL || share_s == NULL || physical_disks_s == NULL ||
+        aggregate_s == NULL || user_s == NULL || hosts_s == NULL) {
         snprintf(body, n, "invalid ALLOCATE command\n");
         return SSU_ERR_INVALID;
     }
@@ -451,9 +452,9 @@ static ssu_err_t handle_allocate(char *save, char *body, size_t n)
 
     req.size_bytes = (uint64_t)strtoull(size_s, NULL, 10);
     req.allocation_type = (ssu_share_type_t)strtol(share_s, NULL, 10);
-    req.shard_count = (uint32_t)strtoul(shards_s, NULL, 10);
+    req.physical_disk_count = (uint32_t)strtoul(physical_disks_s, NULL, 10);
     req.logical_disk_aggregate = (int)strtol(aggregate_s, NULL, 10);
-    req.tenant_id = strcmp(tenant_s, "-") == 0 ? NULL : tenant_s;
+    req.user_id = strcmp(user_s, "-") == 0 ? NULL : user_s;
     req.host_ids = hosts;
 
     memset(&result, 0, sizeof(result));
@@ -472,6 +473,8 @@ static ssu_err_t handle_allocate_result(char *save, char *body, size_t n)
     char *request_id = strtok_r(NULL, " ", &save);
     ssu_api_allocate_result_info_t result;
     ssu_err_t err;
+    size_t used = 0;
+    uint32_t i;
 
     if (request_id == NULL) {
         snprintf(body, n, "invalid ALLOCATE_RESULT command\n");
@@ -485,7 +488,16 @@ static ssu_err_t handle_allocate_result(char *save, char *body, size_t n)
         return err;
     }
 
-    snprintf(body, n, "%s\n", result.device_path);
+    appendf(body, n, &used, "%s\n", result.device_path);
+    for (i = 0; i < result.physical_disk_count; i++) {
+        appendf(body, n, &used, "physical %u %s %s %llu %llu lba=%llu\n",
+                i,
+                result.physical_disks[i].ssu_id,
+                result.physical_disks[i].ns_id,
+                (unsigned long long)result.physical_disks[i].logical_offset,
+                (unsigned long long)result.physical_disks[i].length,
+                (unsigned long long)result.physical_disks[i].lba);
+    }
     return SSU_OK;
 }
 

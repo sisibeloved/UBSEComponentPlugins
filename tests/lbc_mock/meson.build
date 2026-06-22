@@ -20,6 +20,7 @@ if get_option('vendor') == 'lbc_mock'
     'lbc_mock_ubsectl_flow',
     lbc_mock_ubsectl_flow,
     args: [meson.project_build_root()],
+    depends: [ubsectl, ssu_mgr],
     timeout: 20,
   )
 
@@ -29,6 +30,7 @@ if get_option('vendor') == 'lbc_mock'
     'lbc_mock_ubsectl_error_flow',
     lbc_mock_ubsectl_error_flow,
     args: [meson.project_build_root()],
+    depends: [ubsectl, ssu_mgr],
     timeout: 20,
   )
 endif

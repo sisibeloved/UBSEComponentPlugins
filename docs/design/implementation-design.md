@@ -195,8 +195,8 @@ flowchart TB
 
 | 逻辑接口 | SDK | CLI | 说明 |
 | ---- | ---- | ---- | ---- |
-| `INTF_SSU_API_ALLOCATE` | `ssu_api_allocate` | `ubsectl allocate` | 输入空间大小、租户 ID、分片数、逻辑盘聚合开关、共享/独占类型、HostId 列表；返回请求 ID。MVP 当前只支持 `shard_count=1` 且开启逻辑盘聚合，否则返回 `SSU_ERR_UNSUPPORTED`。租户和 HostId 是业务透传标签，本组件不做业务授权校验。 |
-| `INTF_SSU_API_ALLOCATE_RESULT_GET` | `ssu_api_allocate_result_get` | `ubsectl allocate-result-get` | 输入请求 ID；成功返回预留逻辑设备路径，如 `/dev/ssu0`；失败返回错误码和错误信息。MVP 分配是同步完成的，所以请求 ID 当前等同底层 `allocate_id`。 |
+| `INTF_SSU_API_ALLOCATE` | `ssu_api_allocate` | `ubsectl allocate` | 输入逻辑盘空间大小、用户 ID、物理盘数、逻辑盘聚合开关、共享/独占类型、HostId 列表；返回请求 ID。`physical_disk_count=0` 表示按默认单张物理盘分配，也可指定 N 张物理盘；逻辑盘聚合默认打开，MVP 关闭聚合返回 `SSU_ERR_UNSUPPORTED`。用户 ID 和 HostId 是业务透传标签，上游业务系统负责租户隔离/授权，本组件不做业务校验。 |
+| `INTF_SSU_API_ALLOCATE_RESULT_GET` | `ssu_api_allocate_result_get` | `ubsectl allocate-result-get` | 输入请求 ID；成功返回预留逻辑设备路径（如 `/dev/ssu0`）以及各物理盘的 `ssu_id`、`ns_id`、逻辑偏移、长度、LBA；失败返回错误码和错误信息。MVP 分配是同步完成的，所以请求 ID 当前等同底层 `allocate_id`。 |
 | `INTF_SSU_API_LIST` | `ssu_api_list` | `ubsectl list` | 返回当前可用于分配的 SSU 资源列表；函数返回值表达请求成功/失败状态。 |
 | `INTF_SSU_API_MOUNT` | `ssu_api_mount` | `ubsectl mount --dev /dev/ssuN --host HOST` | 输入设备路径与 Host ID；内部反查请求 ID/分配实例，然后建立本机逻辑设备映射。 |
 | `INTF_SSU_API_UNMOUNT` | `ssu_api_unmount` | `ubsectl unmount --dev /dev/ssuN` | 解挂载逻辑设备；保留 SSU 侧 namespace 与数据。 |
@@ -253,6 +253,7 @@ typedef enum {
 typedef struct {
     uint64_t           size_bytes;        // 要求空间大小
     uint64_t           io_bandwidth_bps;  // I/O 带宽要求（0=不约束）
+    uint32_t           physical_disk_count; // 0=按当前策略，>0=指定物理盘数
     ssu_reliability_t  reliability;       // 可靠性策略
     uint32_t           replica_count;     // REPLICA 时副本数
     uint32_t           ec_data;           // EC 数据分片数
@@ -335,12 +336,14 @@ typedef struct {
     uint64_t phys_sector;
 } ssu_logdev_info_t;
 
+#define SSU_API_MAX_PHYSICAL_DISKS 128U
+
 /* —— 逻辑 API：分配请求 —— */
 typedef struct {
-    uint64_t        size_bytes;             // 空间大小
-    const char     *tenant_id;              // 业务透传标签，不做授权校验
-    uint32_t        shard_count;            // 分片数；MVP 仅支持 1
-    int             logical_disk_aggregate; // 是否聚合成逻辑盘；MVP 仅支持开启
+    uint64_t        size_bytes;             // 逻辑盘空间大小
+    const char     *user_id;                // 逻辑盘用户归属；租户隔离由上游业务系统负责
+    uint32_t        physical_disk_count;    // 0=默认单张物理盘，>0=指定物理盘数
+    int             logical_disk_aggregate; // 0/1=默认开启/开启，负数=关闭；MVP 关闭返回不支持
     ssu_share_type_t allocation_type;       // 独占/共享
     const char *const *host_ids;            // 独占为单 Host，共享为 Host 列表
     uint32_t        host_count;
@@ -366,8 +369,18 @@ typedef enum {
 } ssu_err_t;
 
 typedef struct {
+    char     ssu_id[64];
+    char     ns_id[32];
+    uint64_t logical_offset;                // 该物理盘承载的逻辑盘起点
+    uint64_t length;                        // 该物理盘承载的长度
+    uint64_t lba;                           // 物理盘起始 LBA
+} ssu_api_physical_lba_t;
+
+typedef struct {
     ssu_err_t status;                       // SSU_OK 或失败错误码
     char      device_path[64];              // 成功时的 /dev/ssuN
+    uint32_t  physical_disk_count;          // physical_disks 有效项数
+    ssu_api_physical_lba_t physical_disks[SSU_API_MAX_PHYSICAL_DISKS];
     char      error_message[128];           // 失败时的人类可读信息
 } ssu_api_allocate_result_info_t;
 
@@ -1499,7 +1512,7 @@ ssu_reqshim_ko = custom_target('ssu_reqshim.ko',
 
 ## 11. 安全与隔离
 
-- **业务鉴权边界**：租户、业务归属、`allocate_id` 可见性、哪些 host 允许 mount/unmount 等准入判断由上层业务系统负责，本组件不实现租户级授权策略。`tenant` 字段仅作为业务透传标签和日志/查询辅助，不作为本组件内部的授权依据。
+- **业务鉴权边界**：用户归属、租户隔离、`allocate_id` 可见性、哪些 host 允许 mount/unmount 等准入判断由上层业务系统负责，本组件不实现租户级授权策略。逻辑 API 的 `user_id` 会作为业务透传标签进入内部视图和日志/查询辅助，不作为本组件内部的授权依据。
 - **控制面权限**：本组件只校验调用来自受信控制面（如上游 daemon/本机 root 管理通道），并做参数合法性、资源状态、幂等语义检查；非法参数、未知 `allocate_id`/`logical_dev`、越界映射返回错误。
 - **内核态边界**：ReqShim 对所有 ioctl 入参做长度/范围校验，拒绝越界 lba；映射表写操作仅允许 root（CAP_SYS_ADMIN）。
 - **失败隔离**：MVP 采用受信 plugin 进程内 `dlopen`，不承诺单 plugin crash 不影响 daemon；可处理的是超时、错误返回、加载失败、systemd 重启与对账恢复。M10 加固阶段再做独立 plugin worker 进程 + IPC + 超时熔断，使单个厂商 plugin 崩溃不影响其他 plugin。

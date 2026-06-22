@@ -12,7 +12,7 @@ config="$source_dir/tests/mvp2/ssu.conf"
 
 rm -f "$socket" "$aid_file" "$rid_file"
 
-SSU_MOCK_SSU_COUNT=1 "$ssu_mgr" --role=manager --config "$config" --socket "$socket" &
+SSU_MOCK_SSU_COUNT=2 "$ssu_mgr" --role=manager --config "$config" --socket "$socket" &
 mgr_pid=$!
 trap 'kill "$mgr_pid" 2>/dev/null || true; rm -f "$socket" "$aid_file" "$rid_file"' EXIT
 
@@ -54,12 +54,21 @@ if SSU_MGR_SOCKET="$socket" "$ubsectl" alloc --size 8192 --replica 3; then
     exit 1
 fi
 
-SSU_MGR_SOCKET="$socket" "$ubsectl" list | grep -q '^pool entries: 1'
+SSU_MGR_SOCKET="$socket" "$ubsectl" list | grep -q '^pool entries: 2'
+
+if SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
+    --size 8192 \
+    --user user-cli \
+    --no-aggregate \
+    --host local; then
+    echo "logical allocate without aggregation should be unsupported" >&2
+    exit 1
+fi
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
     --size 8192 \
-    --tenant tenant-cli \
-    --shards 1 \
+    --user user-cli \
+    --physical-disks 2 \
     --aggregate \
     --share exclusive \
     --host local \
@@ -67,11 +76,16 @@ SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
 rid=$(cat "$rid_file")
 test "$rid" = "alloc-1"
 
-dev=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$rid")
+result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$rid")
+dev=$(printf '%s\n' "$result" | sed -n '1p')
 test "$dev" = "/dev/ssu1"
+printf '%s\n' "$result" | grep -q '^physical 0 mock-ssu0 mock-ns[0-9][0-9]* 0 4096 lba=0$'
+printf '%s\n' "$result" | grep -q '^physical 1 mock-ssu1 mock-ns[0-9][0-9]* 4096 4096 lba=0$'
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
-SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev | grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]"
+logdev_output=$(SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev)
+printf '%s\n' "$logdev_output" | grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]\+0[[:space:]]\+4096[[:space:]]\+/dev/nullb0"
+printf '%s\n' "$logdev_output" | grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]\+4096[[:space:]]\+4096[[:space:]]\+/dev/nullb1"
 
 if SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"; then
     echo "free while mounted should fail" >&2

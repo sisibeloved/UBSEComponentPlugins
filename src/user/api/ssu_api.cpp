@@ -56,6 +56,22 @@ static void copy_cstr(char *dst, size_t n, const char *src)
     snprintf(dst, n, "%s", src);
 }
 
+static int compare_allocation_offset(const void *a, const void *b)
+{
+    const ssu_allocation_info_t *left = (const ssu_allocation_info_t *)a;
+    const ssu_allocation_info_t *right = (const ssu_allocation_info_t *)b;
+
+    if (left->logical_offset < right->logical_offset) {
+        return -1;
+    }
+
+    if (left->logical_offset > right->logical_offset) {
+        return 1;
+    }
+
+    return 0;
+}
+
 static const char *ssu_err_message(ssu_err_t err)
 {
     switch (err) {
@@ -249,6 +265,55 @@ static int allocation_exists(const char *request_id)
     return 0;
 }
 
+static ssu_err_t fill_allocation_lbas(
+    const char *request_id,
+    ssu_api_allocate_result_info_t *out)
+{
+    ssu_query_req_t req = {};
+    ssu_allocation_info_t allocations[SSU_API_MAX_PHYSICAL_DISKS];
+    ssu_allocation_info_t matches[SSU_API_MAX_PHYSICAL_DISKS];
+    uint32_t count = SSU_API_MAX_PHYSICAL_DISKS;
+    uint32_t matched = 0;
+    uint32_t i;
+    ssu_err_t err;
+
+    req.type = SSU_QUERY_ALLOCATION;
+    err = ssu_resource_query(&req, allocations, sizeof(allocations[0]),
+                             &count);
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (strcmp(allocations[i].allocate_id, request_id) == 0) {
+            if (matched >= SSU_API_MAX_PHYSICAL_DISKS) {
+                return SSU_ERR_BUFFER_TOO_SMALL;
+            }
+            matches[matched++] = allocations[i];
+        }
+    }
+
+    if (matched == 0) {
+        return SSU_ERR_NOT_FOUND;
+    }
+
+    qsort(matches, matched, sizeof(matches[0]), compare_allocation_offset);
+    out->physical_disk_count = matched;
+    for (i = 0; i < matched; i++) {
+        copy_cstr(out->physical_disks[i].ssu_id,
+                  sizeof(out->physical_disks[i].ssu_id),
+                  matches[i].ssu_id);
+        copy_cstr(out->physical_disks[i].ns_id,
+                  sizeof(out->physical_disks[i].ns_id),
+                  matches[i].ns_id);
+        out->physical_disks[i].logical_offset = matches[i].logical_offset;
+        out->physical_disks[i].length = matches[i].length;
+        out->physical_disks[i].lba = matches[i].phys_sector;
+    }
+
+    return SSU_OK;
+}
+
 static int logdev_request_id(const char *device_path, char *out, size_t n)
 {
     ssu_query_req_t req = {};
@@ -430,7 +495,7 @@ ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
     ssu_err_t err;
 
     if (req == NULL || out == NULL || req->size_bytes == 0 ||
-        req->shard_count == 0 || req->host_ids == NULL ||
+        is_empty_string(req->user_id) || req->host_ids == NULL ||
         req->host_count == 0) {
         return SSU_ERR_INVALID;
     }
@@ -451,15 +516,17 @@ ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
         }
     }
 
-    if (req->shard_count != 1 || !req->logical_disk_aggregate) {
+    if (req->logical_disk_aggregate < 0) {
         return SSU_ERR_UNSUPPORTED;
     }
 
     resource_req.size_bytes = req->size_bytes;
+    resource_req.physical_disk_count =
+        req->physical_disk_count == 0 ? 1 : req->physical_disk_count;
     resource_req.reliability = SSU_RELIABILITY_STRIPE;
     resource_req.share_type = req->allocation_type;
     resource_req.map_dir = SSU_MAP_DIR_FORWARD;
-    resource_req.tenant = req->tenant_id;
+    resource_req.tenant = req->user_id;
 
     memset(&alloc_result, 0, sizeof(alloc_result));
     err = ssu_resource_alloc(&resource_req, &alloc_result, NULL, NULL);
@@ -514,6 +581,7 @@ ssu_err_t ssu_api_allocate_result_get(
     ssu_api_allocate_result_info_t *out)
 {
     api_request_t *slot;
+    ssu_err_t err;
 
     if (is_empty_string(request_id) || out == NULL) {
         return SSU_ERR_INVALID;
@@ -537,6 +605,14 @@ ssu_err_t ssu_api_allocate_result_get(
 
     out->status = SSU_OK;
     copy_cstr(out->device_path, sizeof(out->device_path), slot->device_path);
+    err = fill_allocation_lbas(request_id, out);
+    if (err != SSU_OK) {
+        out->status = err;
+        copy_cstr(out->error_message, sizeof(out->error_message),
+                  ssu_err_message(err));
+        return err;
+    }
+
     return SSU_OK;
 }
 
