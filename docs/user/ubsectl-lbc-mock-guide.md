@@ -99,6 +99,7 @@ port=4420
 subnqn=nqn.2025-01.io.ssu:m0
 nsze=1048576
 log_file=/tmp/ubse-lbc-mock.log
+ssu_count=3
 physical_disk_count=0  # allocate 默认单张物理盘
 logical_disk_aggregate=on
 ```
@@ -277,7 +278,7 @@ pool entries: 1
 lbc-mock-ssu0 lbc-mock-host0 ONLINE 0/536870912
 ```
 
-当前 LBC mock 快速路径默认只发现一个 `lbc-mock-ssu0`，所以这里的主流程不要传 `--physical-disks 2`。多物理盘逻辑见后面的“多物理盘和数据面验证”。
+当前 LBC mock 快速路径默认发现 3 个 mock SSU：`lbc-mock-ssu0`、`lbc-mock-ssu1`、`lbc-mock-ssu2`。不传 `--physical-disks` 时仍按单张物理盘分配；需要验证多物理盘时可以显式传 `--physical-disks 3`。
 
 申请 512 MiB 空间：
 
@@ -439,16 +440,16 @@ int main()
 
 ```bash
 sudo ./build-lbc/tools/ubsectl allocate \
-    --size 8192 \
+    --size 12288 \
     --user user-demo \
-    --physical-disks 2 \
+    --physical-disks 3 \
     --host local \
     --out /tmp/ssu-rid
 ```
 
 成功后 `allocate-result-get` 会返回多条 `physical` 行；`mount` 后 `query --type logdev` 也会看到同一个 `/dev/ssuN` 对应多条物理映射。
 
-不过当前 LBC mock 插件默认只发现一个 `lbc-mock-ssu0`，所以这条命令在 LBC mock 快速路径下会因为物理盘不足返回 `SSU_ERR_NO_RESOURCE`。多物理盘控制面和用户态数据面目前用默认 mock 验收：
+LBC mock 快速路径默认暴露 3 个 mock SSU，所以 `--physical-disks 3` 可以用于控制面验收。默认 mock 也会覆盖同样的 3 盘路径：
 
 ```bash
 meson test -C build mvp2_check --print-errorlogs
@@ -458,7 +459,7 @@ meson test -C build mvp4_check --print-errorlogs
 
 其中：
 
-- `mvp2_check` 验证 `--physical-disks 2`、两条物理 LBA、两条 `logdev` 映射。
+- `mvp2_check` 验证 `--physical-disks 3`、三条物理 LBA、三条 `logdev` 映射。
 - `mvp3_check` 验证挂载后通过 `ssu_smoke` 做用户态数据面读写。
 - `mvp4_check` 验证 SDK 驱动的分配、挂载、读写、解挂载、释放闭环。
 
@@ -502,6 +503,7 @@ subnqn=nqn.2025-01.io.ssu:m0
 dev_dir=/dev
 configfs_dir=/sys/kernel/config/nvmet/subsystems
 log_file=/tmp/ubse-lbc-mock.log
+ssu_count=3
 ```
 
 如果确实需要改，比如测试时想把 `/dev` 和 configfs 指到临时目录，可以在 `$LBC_PREFIX/mock/ssu_lbc_mock.conf` 写：
@@ -513,6 +515,7 @@ subnqn=nqn.2025-01.io.ssu:m0
 dev_dir=/dev
 configfs_dir=/sys/kernel/config/nvmet/subsystems
 log_file=/tmp/ubse-lbc-mock.log
+ssu_count=3
 ```
 
 这份配置只属于 LBC mock SSU Plugin，不是整个 SSU Manager 的全局配置。

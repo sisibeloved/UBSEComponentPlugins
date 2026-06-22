@@ -12,7 +12,7 @@ config="$source_dir/tests/mvp2/ssu.conf"
 
 rm -f "$socket" "$aid_file" "$rid_file"
 
-SSU_MOCK_SSU_COUNT=2 "$ssu_mgr" --role=manager --config "$config" --socket "$socket" &
+SSU_MOCK_SSU_COUNT=3 "$ssu_mgr" --role=manager --config "$config" --socket "$socket" &
 mgr_pid=$!
 trap 'kill "$mgr_pid" 2>/dev/null || true; rm -f "$socket" "$aid_file" "$rid_file"' EXIT
 
@@ -54,7 +54,7 @@ if SSU_MGR_SOCKET="$socket" "$ubsectl" alloc --size 8192 --replica 3; then
     exit 1
 fi
 
-SSU_MGR_SOCKET="$socket" "$ubsectl" list | grep -q '^pool entries: 2'
+SSU_MGR_SOCKET="$socket" "$ubsectl" list | grep -q '^pool entries: 3'
 
 if SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
     --size 8192 \
@@ -66,9 +66,9 @@ if SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
 fi
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
-    --size 8192 \
+    --size 12288 \
     --user user-cli \
-    --physical-disks 2 \
+    --physical-disks 3 \
     --aggregate \
     --share exclusive \
     --host local \
@@ -81,11 +81,13 @@ dev=$(printf '%s\n' "$result" | sed -n '1p')
 test "$dev" = "/dev/ssu1"
 printf '%s\n' "$result" | grep -q '^physical 0 mock-ssu0 mock-ns[0-9][0-9]* 0 4096 lba=0$'
 printf '%s\n' "$result" | grep -q '^physical 1 mock-ssu1 mock-ns[0-9][0-9]* 4096 4096 lba=0$'
+printf '%s\n' "$result" | grep -q '^physical 2 mock-ssu2 mock-ns[0-9][0-9]* 8192 4096 lba=0$'
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
 logdev_output=$(SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev)
 printf '%s\n' "$logdev_output" | grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]\+0[[:space:]]\+4096[[:space:]]\+/dev/nullb0"
 printf '%s\n' "$logdev_output" | grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]\+4096[[:space:]]\+4096[[:space:]]\+/dev/nullb1"
+printf '%s\n' "$logdev_output" | grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]\+8192[[:space:]]\+4096[[:space:]]\+/dev/nullb2"
 
 if SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"; then
     echo "free while mounted should fail" >&2

@@ -23,11 +23,13 @@
 #define LBC_MOCK_SECTOR_SIZE 512ULL
 #define LBC_MOCK_TOTAL_BYTES (LBC_MOCK_NSZE * LBC_MOCK_SECTOR_SIZE)
 #define LBC_MOCK_SUBNQN_MAX 31U
+#define LBC_MOCK_DEFAULT_SSU_COUNT 3U
 
 typedef struct {
     char prefix[256];
     char dev_ip[64];
     uint16_t port;
+    uint32_t resource_count;
     char subnqn[32];
     char dev_dir[256];
     char configfs_dir[256];
@@ -56,6 +58,7 @@ static lbc_mock_config_t lbc_config = {
     ".",
     "127.0.0.1",
     4420,
+    LBC_MOCK_DEFAULT_SSU_COUNT,
     "nqn.2025-01.io.ssu:m0",
     "/dev",
     "/sys/kernel/config/nvmet/subsystems",
@@ -151,6 +154,7 @@ static void apply_config_pair(const char *key, const char *value)
 {
     char *end = NULL;
     unsigned long port;
+    unsigned long count;
 
     if (strcmp(key, "dev_ip") == 0 || strcmp(key, "dev-ip") == 0) {
         copy_cstr(lbc_config.dev_ip, sizeof(lbc_config.dev_ip), value);
@@ -165,6 +169,22 @@ static void apply_config_pair(const char *key, const char *value)
             lbc_config.port = (uint16_t)port;
         } else {
             lbc_mock_log("ignore invalid config port=%s", value);
+        }
+        return;
+    }
+
+    if (strcmp(key, "ssu_count") == 0 ||
+        strcmp(key, "ssu-count") == 0 ||
+        strcmp(key, "resource_count") == 0 ||
+        strcmp(key, "resource-count") == 0) {
+        errno = 0;
+        count = strtoul(value, &end, 10);
+        if (errno == 0 && end != value && *end == '\0' &&
+            count > 0 && count <= LBC_MOCK_MAX_NAMESPACES) {
+            lbc_config.resource_count = (uint32_t)count;
+        } else {
+            lbc_mock_log("ignore invalid config ssu_count=%s max=%u",
+                         value, LBC_MOCK_MAX_NAMESPACES);
         }
         return;
     }
@@ -262,10 +282,12 @@ static void ensure_config_loaded(void)
     }
 
     load_config_file(config_path);
-    lbc_mock_log("config prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u log_file=%s",
+    lbc_mock_log("config prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u ssu_count=%u log_file=%s",
                  lbc_config.prefix, lbc_config.dev_dir,
                  lbc_config.configfs_dir, lbc_config.subnqn,
-                 (unsigned int)lbc_config.port, lbc_config.log_file);
+                 (unsigned int)lbc_config.port,
+                 (unsigned int)lbc_config.resource_count,
+                 lbc_config.log_file);
 }
 
 static int script_exists(const char *relative_path)
@@ -499,6 +521,22 @@ static lbc_mock_namespace_t *find_namespace_by_allocate(
     return NULL;
 }
 
+static lbc_mock_namespace_t *find_namespace_by_allocate_ssu(
+    const char *allocate_id, const char *ssu_id)
+{
+    uint32_t i;
+
+    for (i = 0; i < LBC_MOCK_MAX_NAMESPACES; i++) {
+        if (namespaces[i].active &&
+            strcmp(namespaces[i].allocate_id, allocate_id) == 0 &&
+            strcmp(namespaces[i].ssu_id, ssu_id) == 0) {
+            return &namespaces[i];
+        }
+    }
+
+    return NULL;
+}
+
 static lbc_mock_namespace_t *find_namespace(const char *ssu_id,
                                             const char *ns_id)
 {
@@ -513,6 +551,31 @@ static lbc_mock_namespace_t *find_namespace(const char *ssu_id,
     }
 
     return NULL;
+}
+
+static int parse_lbc_mock_ssu_id(const char *ssu_id, uint32_t *out_index)
+{
+    const char prefix[] = "lbc-mock-ssu";
+    const size_t prefix_len = sizeof(prefix) - 1;
+    char *end = NULL;
+    unsigned long index;
+
+    if (is_empty_string(ssu_id) ||
+        strncmp(ssu_id, prefix, prefix_len) != 0) {
+        return 0;
+    }
+
+    errno = 0;
+    index = strtoul(ssu_id + prefix_len, &end, 10);
+    if (errno != 0 || end == ssu_id + prefix_len || *end != '\0' ||
+        index > UINT32_MAX || index >= lbc_config.resource_count) {
+        return 0;
+    }
+
+    if (out_index != NULL) {
+        *out_index = (uint32_t)index;
+    }
+    return 1;
 }
 
 static lbc_mock_mount_t *find_mount(const char *logical_dev)
@@ -608,6 +671,7 @@ ssu_err_t ssu_lbc_mock_configure(const ssu_lbc_mock_config_t *config)
               is_empty_string(config->dev_ip) ? "127.0.0.1" :
                                                 config->dev_ip);
     lbc_config.port = config->port == 0 ? 4420 : config->port;
+    lbc_config.resource_count = LBC_MOCK_DEFAULT_SSU_COUNT;
     copy_cstr(lbc_config.subnqn, sizeof(lbc_config.subnqn),
               is_empty_string(config->subnqn) ?
                   "nqn.2025-01.io.ssu:m0" : config->subnqn);
@@ -626,10 +690,12 @@ ssu_err_t ssu_lbc_mock_configure(const ssu_lbc_mock_config_t *config)
     next_nsid = 1;
     target_ready = 0;
     config_loaded = 1;
-    lbc_mock_log("configure prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u log_file=%s",
+    lbc_mock_log("configure prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u ssu_count=%u log_file=%s",
                  lbc_config.prefix, lbc_config.dev_dir,
                  lbc_config.configfs_dir, lbc_config.subnqn,
-                 (unsigned int)lbc_config.port, lbc_config.log_file);
+                 (unsigned int)lbc_config.port,
+                 (unsigned int)lbc_config.resource_count,
+                 lbc_config.log_file);
     return SSU_OK;
 }
 
@@ -641,24 +707,30 @@ static const char *lbc_mock_name(void)
 static ssu_err_t lbc_mock_discover(ssu_resource_info_t *out,
                                    uint32_t *inout_count)
 {
+    uint32_t i;
+
     ensure_config_loaded();
 
     if (inout_count == NULL) {
         return SSU_ERR_INVALID;
     }
 
-    if (out == NULL || *inout_count < 1) {
-        *inout_count = 1;
+    if (out == NULL || *inout_count < lbc_config.resource_count) {
+        *inout_count = lbc_config.resource_count;
         return SSU_ERR_BUFFER_TOO_SMALL;
     }
 
-    memset(out, 0, sizeof(out[0]));
-    copy_cstr(out[0].ssu_id, sizeof(out[0].ssu_id), "lbc-mock-ssu0");
-    copy_cstr(out[0].host_id, sizeof(out[0].host_id), "lbc-mock-host0");
-    copy_cstr(out[0].state, sizeof(out[0].state), "ONLINE");
-    out[0].total_bytes = LBC_MOCK_TOTAL_BYTES;
-    out[0].used_bytes = 0;
-    *inout_count = 1;
+    for (i = 0; i < lbc_config.resource_count; i++) {
+        memset(&out[i], 0, sizeof(out[i]));
+        snprintf(out[i].ssu_id, sizeof(out[i].ssu_id),
+                 "lbc-mock-ssu%u", i);
+        snprintf(out[i].host_id, sizeof(out[i].host_id),
+                 "lbc-mock-host%u", i);
+        copy_cstr(out[i].state, sizeof(out[i].state), "ONLINE");
+        out[i].total_bytes = LBC_MOCK_TOTAL_BYTES;
+        out[i].used_bytes = 0;
+    }
+    *inout_count = lbc_config.resource_count;
     return SSU_OK;
 }
 
@@ -676,13 +748,14 @@ static ssu_err_t lbc_mock_connect(const char *ssu_id, char *out_devname,
         return SSU_ERR_INVALID;
     }
 
-    if (strcmp(ssu_id, "lbc-mock-ssu0") != 0) {
+    if (!parse_lbc_mock_ssu_id(ssu_id, NULL)) {
         lbc_mock_log("connect failed: unknown ssu_id=%s", ssu_id);
         return SSU_ERR_NOT_FOUND;
     }
 
     for (i = 0; i < LBC_MOCK_MAX_NAMESPACES; i++) {
         if (namespaces[i].active &&
+            strcmp(namespaces[i].ssu_id, ssu_id) == 0 &&
             !is_empty_string(namespaces[i].dev_path)) {
             copy_cstr(out_devname, n, namespaces[i].dev_path);
             return SSU_OK;
@@ -705,7 +778,7 @@ static ssu_err_t lbc_mock_health_check(const char *ssu_id, char *out_state,
         return SSU_ERR_INVALID;
     }
 
-    if (strcmp(ssu_id, "lbc-mock-ssu0") != 0) {
+    if (!parse_lbc_mock_ssu_id(ssu_id, NULL)) {
         lbc_mock_log("health_check failed: unknown ssu_id=%s", ssu_id);
         return SSU_ERR_NOT_FOUND;
     }
@@ -758,7 +831,7 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
                  (int)extent_req->policy, lbc_config.dev_dir,
                  lbc_config.subnqn);
 
-    if (strcmp(extent_req->ssu_id, "lbc-mock-ssu0") != 0) {
+    if (!parse_lbc_mock_ssu_id(extent_req->ssu_id, NULL)) {
         lbc_mock_log("create_ns failed: unknown ssu_id=%s allocate_id=%s",
                      extent_req->ssu_id, extent_req->allocate_id);
         return SSU_ERR_NOT_FOUND;
@@ -770,9 +843,10 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
         return SSU_ERR_UNSUPPORTED;
     }
 
-    if (find_namespace_by_allocate(extent_req->allocate_id) != NULL) {
-        lbc_mock_log("create_ns failed: allocate_id already exists allocate_id=%s",
-                     extent_req->allocate_id);
+    if (find_namespace_by_allocate_ssu(extent_req->allocate_id,
+                                       extent_req->ssu_id) != NULL) {
+        lbc_mock_log("create_ns failed: allocate_id already exists on ssu allocate_id=%s ssu_id=%s",
+                     extent_req->allocate_id, extent_req->ssu_id);
         return SSU_ERR_NS_EXISTS;
     }
 

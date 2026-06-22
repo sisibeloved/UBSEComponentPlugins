@@ -38,6 +38,13 @@ subnqn=
 nsid=
 nsze=
 devpath=
+next_nsid() {
+    i=1
+    while [ -e "$dev_dir/nvme1n\$i" ]; do
+        i=\$((i + 1))
+    done
+    printf '%s\n' "\$i"
+}
 echo run "\$sample" "\$@" >> "$log_file"
 while [ "\$#" -gt 0 ]; do
     case "\$1" in
@@ -52,10 +59,10 @@ done
 
 if [ "\$sample" = "./sample_create_attach" ]; then
     test "\$nsze" = "1048576"
-    : > "$dev_dir/nvme1n1"
-    mkdir -p "$configfs_dir/\$subnqn/namespaces/1"
+    nsid=\$(next_nsid)
+    : > "$dev_dir/nvme1n\$nsid"
+    mkdir -p "$configfs_dir/\$subnqn/namespaces/\$nsid"
 elif [ "\$sample" = "./sample_detach_delete" ]; then
-    test "\$nsid" = "1"
     rm -f "\$devpath"
     rm -rf "$configfs_dir/\$subnqn/namespaces/\$nsid"
 else
@@ -91,6 +98,10 @@ done
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
     grep -q '^lbc-mock-ssu0[[:space:]]\+lbc-mock-host0[[:space:]]\+ONLINE'
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
+    grep -q '^pool entries: 3'
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
+    grep -q '^lbc-mock-ssu2[[:space:]]\+lbc-mock-host2[[:space:]]\+ONLINE'
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" alloc \
     --size 512M --stripe --share exclusive --out "$aid_file"
@@ -111,6 +122,37 @@ SSU_MGR_SOCKET="$socket" "$ubsectl" release --aid "$aid"
 test ! -e "$dev_dir/nvme1n1"
 test ! -d "$configfs_dir/$subnqn/namespaces/1"
 
+SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
+    --size 12288 \
+    --user user-lbc \
+    --physical-disks 3 \
+    --aggregate \
+    --share exclusive \
+    --host local \
+    --out "$aid_file"
+rid=$(cat "$aid_file")
+test "$rid" = "alloc-1"
+
+result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$rid")
+dev=$(printf '%s\n' "$result" | sed -n '1p')
+test "$dev" = "/dev/ssu1"
+printf '%s\n' "$result" | grep -q '^physical 0 lbc-mock-ssu0 2 0 4096 lba=0$'
+printf '%s\n' "$result" | grep -q '^physical 1 lbc-mock-ssu1 3 4096 4096 lba=0$'
+printf '%s\n' "$result" | grep -q '^physical 2 lbc-mock-ssu2 4 8192 4096 lba=0$'
+
+SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
+    grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]\+8192[[:space:]]\+4096[[:space:]]\+$dev_dir/nvme1n3"
+SSU_MGR_SOCKET="$socket" "$ubsectl" unmount --dev "$dev"
+SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"
+
+test ! -e "$dev_dir/nvme1n1"
+test ! -e "$dev_dir/nvme1n2"
+test ! -e "$dev_dir/nvme1n3"
+test ! -d "$configfs_dir/$subnqn/namespaces/2"
+test ! -d "$configfs_dir/$subnqn/namespaces/3"
+test ! -d "$configfs_dir/$subnqn/namespaces/4"
+
 grep -q 'setup nqn.2025-01.io.ssu:m0 4420' "$log_file"
 grep -q 'config prefix=' "$log_file"
 grep -q 'run cwd=' "$log_file"
@@ -121,3 +163,4 @@ grep -q 'create_ns success allocate_id=alloc-0 ns_id=1' "$log_file"
 grep -q 'mount success allocate_id=alloc-0 host_id=local logical_dev=/dev/ssu0' "$log_file"
 grep -q 'unmount success logical_dev=/dev/ssu0 allocate_id=alloc-0 host_id=local' "$log_file"
 grep -q 'delete_ns success ssu_id=lbc-mock-ssu0 ns_id=1' "$log_file"
+grep -q 'delete_ns success ssu_id=lbc-mock-ssu2 ns_id=4' "$log_file"

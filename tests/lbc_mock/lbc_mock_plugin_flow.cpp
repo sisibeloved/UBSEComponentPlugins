@@ -177,6 +177,13 @@ static int create_fake_lbc_prefix(const char *prefix, const char *dev_dir,
                    "nsid=\n"
                    "nsze=\n"
                    "devpath=\n"
+                   "next_nsid() {\n"
+                   "  i=1\n"
+                   "  while [ -e '%s/nvme1n'\"$i\" ]; do\n"
+                   "    i=$((i + 1))\n"
+                   "  done\n"
+                   "  printf '%%s\\n' \"$i\"\n"
+                   "}\n"
                    "echo run \"$sample\" \"$@\" >> '%s'\n"
                    "while [ $# -gt 0 ]; do\n"
                    "  case \"$1\" in\n"
@@ -190,16 +197,17 @@ static int create_fake_lbc_prefix(const char *prefix, const char *dev_dir,
                    "done\n"
                    "if [ \"$sample\" = './sample_create_attach' ]; then\n"
                    "  test \"$nsze\" = '1048576'\n"
-                   "  : > '%s/nvme1n1'\n"
-                   "  mkdir -p '%s'/\"$subnqn\"/namespaces/1\n"
+                   "  nsid=$(next_nsid)\n"
+                   "  : > '%s/nvme1n'\"$nsid\"\n"
+                   "  mkdir -p '%s'/\"$subnqn\"/namespaces/\"$nsid\"\n"
                    "elif [ \"$sample\" = './sample_detach_delete' ]; then\n"
-                   "  test \"$nsid\" = '1'\n"
                    "  rm -f \"$devpath\"\n"
                    "  rm -rf '%s'/\"$subnqn\"/namespaces/\"$nsid\"\n"
                    "else\n"
                    "  exit 2\n"
                    "fi\n",
-                   log_path, dev_dir, configfs_dir, configfs_dir) != 0) {
+                   dev_dir, log_path, dev_dir, configfs_dir,
+                   configfs_dir) != 0) {
         return 1;
     }
 
@@ -218,8 +226,8 @@ static int run_plugin_flow(const char *prefix, const char *dev_dir,
     ssu_lbc_mock_config_t config = {};
     ssu_lbc_mock_config_t bad_config = {};
     const ssu_plugin_ops_t *plugin;
-    ssu_resource_info_t resources[1];
-    uint32_t resource_count = 1;
+    ssu_resource_info_t resources[3];
+    uint32_t resource_count = 3;
     ssu_extent_create_req_t req = {};
     char ns_id[32];
     char dev_path[128];
@@ -259,8 +267,10 @@ static int run_plugin_flow(const char *prefix, const char *dev_dir,
         return 1;
     }
 
-    if (resource_count != 1 ||
-        strcmp(resources[0].ssu_id, "lbc-mock-ssu0") != 0) {
+    if (resource_count != 3 ||
+        strcmp(resources[0].ssu_id, "lbc-mock-ssu0") != 0 ||
+        strcmp(resources[1].ssu_id, "lbc-mock-ssu1") != 0 ||
+        strcmp(resources[2].ssu_id, "lbc-mock-ssu2") != 0) {
         fputs("discover returned unexpected LBC mock resource\n", stderr);
         return 1;
     }
@@ -335,8 +345,8 @@ static int run_real_plugin_flow(const char *prefix)
     ssu_lbc_mock_config_t config = {};
     const char *subnqn = "nqn.2025-01.io.ssu:m0";
     const ssu_plugin_ops_t *plugin;
-    ssu_resource_info_t resources[1];
-    uint32_t resource_count = 1;
+    ssu_resource_info_t resources[3];
+    uint32_t resource_count = 3;
     ssu_extent_create_req_t req = {};
     char ns_id[32];
     char dev_path[128];
