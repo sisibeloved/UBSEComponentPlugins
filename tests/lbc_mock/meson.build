@@ -12,3 +12,14 @@ lbc_mock_plugin_flow = executable(
 )
 
 test('lbc_mock_plugin_flow', lbc_mock_plugin_flow)
+
+if get_option('vendor') == 'lbc_mock'
+  lbc_mock_ubsectl_flow = find_program('ubsectl_flow.sh')
+
+  test(
+    'lbc_mock_ubsectl_flow',
+    lbc_mock_ubsectl_flow,
+    args: [meson.project_build_root()],
+    timeout: 20,
+  )
+endif

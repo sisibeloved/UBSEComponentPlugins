@@ -15,6 +15,7 @@
 - [架构一览](#架构一览)
 - [仓库结构](#仓库结构)
 - [快速开始（mock，无需真实硬件）](#快速开始mock无需真实硬件)
+- [用户手册](#用户手册)
 - [构建](#构建)
 - [测试与验收](#测试与验收)
 - [运行时角色与 CLI](#运行时角色与-cli)
@@ -93,7 +94,7 @@ UBSEComponentPlugins/
 │   │   ├── scheduler/        # Scheduler：MVP 最简选片
 │   │   ├── dataplane/        # 用户态数据面辅助
 │   │   ├── runtime/          # 角色装配：ssu-mgr / ssu-agent 启动入口
-│   │   └── plugin/vendors/mock/   # mock plugin（null_blk / 文件后端）
+│   │   └── plugin/vendors/        # mock / lbc_mock SSU plugin
 │   └── kernel/reqshim/       # ssu_reqshim.ko（内核态块设备驱动，独立 Kbuild）
 ├── tools/ubsectl.cpp         # ubsectl CLI
 ├── tests/
@@ -102,7 +103,9 @@ UBSEComponentPlugins/
 │   └── stubs/ubs_io/         # UBS IO 替身：ssu_smoke
 ├── scripts/build_reqshim.sh  # 内核模块构建辅助
 ├── meson.build / meson_options.txt
-└── docs/design/              # 设计文档 + MVP 实现计划
+└── docs/
+    ├── design/               # 设计文档 + MVP 实现计划
+    └── user/                 # 集成方用户手册
 ```
 
 ---
@@ -141,6 +144,12 @@ echo $?   # 0 = 全链路通过
 
 ---
 
+## 用户手册
+
+- [ubsectl + LBC mock 集成手册](docs/user/ubsectl-lbc-mock-guide.md) —— 给上游集成方看的操作说明：只启动 `ssu-mgr`、只调用 `ubsectl`，底层自动走 LBC mock。
+
+---
+
 ## 构建
 
 **用户态（默认）**
@@ -154,7 +163,7 @@ Meson 选项（`meson_options.txt`）：
 
 | 选项 | 默认 | 说明 |
 | ---- | ---- | ---- |
-| `vendor` | `mock` | 厂商 plugin（当前仅 mock） |
+| `vendor` | `mock` | 厂商 plugin：`mock` 或 `lbc_mock` |
 | `combine_core` | `false` | 是否合并 Controller+Scheduler 为单一 `libssu_core.so` |
 | `build_kernel` | `disabled` | 是否构建 out-of-tree ReqShim `.ko` |
 | `kernel_src_dir` | `''` | 内核构建树，如 `/lib/modules/$(uname -r)/build` |
@@ -200,7 +209,7 @@ Manager 与 Agent 是**同一份 daemon 的两种启用方式**（`ssu-mgr` / `s
 ```ini
 # ssu.conf
 role=manager      # manager | agent
-vendor=mock       # 当前仅 mock
+vendor=mock       # mock | lbc_mock（实际由 Meson vendor 选项决定）
 ```
 
 CLI：
