@@ -1,6 +1,6 @@
 libssu_plugin_lbc_mock = shared_library(
   'ssu_plugin_lbc_mock',
-  sources: ['ssu_plugin_lbc_mock.cpp'],
+  sources: ['ssu_plugin_lbc_mock.cpp', reqshim_iface_sources],
   include_directories: inc,
   dependencies: [ssu_headers_dep],
   install: true,

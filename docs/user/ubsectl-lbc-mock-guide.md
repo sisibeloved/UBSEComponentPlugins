@@ -9,6 +9,8 @@
 3. 让 `ubsectl` 连接这个 `ssu-mgr`。
 4. 后续只用 `ubsectl allocate/list/allocate-result-get/mount/unmount/free`。
 
+其中 `allocate/free` 走 LBC mock 脚本创建和删除 `/dev/nvmeXnY`；`mount/unmount` 会再通过 ReqShim 的 `/dev/ssu-ctl` 下发 `LOGDEV_CREATE/MAP_ADD/MAP_DEL/LOGDEV_DESTROY`，把 `/dev/ssuN` 逻辑块设备建出来或拆掉。
+
 ## 一句话结论
 
 可以做到“上游只感知 `ubsectl`，底层自动走 LBC mock”。
@@ -23,17 +25,31 @@
   -> LBC mock SSU Plugin
   -> mock/setup_mock_target.sh / mock/run_mock.sh
   -> /dev/nvmeXnY
+  -> /dev/ssu-ctl
+  -> /dev/ssuN
 ```
 
 ## 最快验证路径
 
-只需要准备一个环境变量：`LBC_PREFIX`。
+控制面 create/attach 只需要准备一个环境变量：`LBC_PREFIX`。如果要执行 `mount` 并对 `/dev/ssuN` 做数据面验证，还需要先加载 ReqShim 内核模块，让 `/dev/ssu-ctl` 存在。
 
 ```bash
 export LBC_PREFIX=/path/to/lbc/mock/prefix
 
 meson setup build-lbc -Dvendor=lbc_mock
 meson compile -C build-lbc
+```
+
+如果当前机器有可用的内核构建目录，可以同时构建并加载 ReqShim：
+
+```bash
+meson setup build-lbc-kernel \
+    -Dvendor=lbc_mock \
+    -Dbuild_kernel=enabled \
+    -Dkernel_src_dir=/lib/modules/$(uname -r)/build
+meson compile -C build-lbc-kernel
+sudo insmod build-lbc-kernel/src/kernel/reqshim/ssu_reqshim.ko
+ls /dev/ssu-ctl
 ```
 
 第一个终端启动 manager：
@@ -66,6 +82,8 @@ sudo ./build-lbc/tools/ubsectl mount \
     --dev "$DEV" \
     --host local
 
+ls /dev/ssu*
+
 sudo ./build-lbc/tools/ubsectl query --type logdev
 
 sudo ./build-lbc/tools/ubsectl unmount --dev "$DEV"
@@ -84,6 +102,8 @@ log_file=/tmp/ubse-lbc-mock.log
 physical_disk_count=0  # allocate 默认单张物理盘
 logical_disk_aggregate=on
 ```
+
+如果没有加载 ReqShim，真实 `/dev` 环境下 `mount` 会失败，并在 `ssu-mgr` 终端和 `/tmp/ubse-lbc-mock.log` 里看到 `/dev/ssu-ctl` 打开失败的信息。这种情况下 `allocate` 仍可能成功，因为 LBC mock 已经创建了 `/dev/nvmeXnY`，但还没有把它挂成 `/dev/ssuN`。
 
 ## 逻辑 API 参数怎么理解
 
@@ -297,6 +317,11 @@ sudo ./build-lbc/tools/ubsectl mount \
     --host local
 ```
 
+这一步会做两件事：
+
+- 调 LBC mock 已经 attach 出来的 `/dev/nvmeXnY` 作为物理块设备。
+- 通过 `/dev/ssu-ctl` 给 ReqShim 下发 `LOGDEV_CREATE` 和 `MAP_ADD`，创建 `/dev/ssuN` 并写入逻辑区间到物理区间的映射。
+
 查看逻辑设备到真实 NVMe namespace 的映射：
 
 ```bash
@@ -315,7 +340,9 @@ logdev entries: 1
 可以用系统命令确认：
 
 ```bash
+ls /dev/ssu*
 ls /dev/nvme*n*
+lsblk "$DEV"
 lsblk /dev/nvme1n1
 cat /sys/class/block/nvme1n1/size
 ls /sys/kernel/config/nvmet/subsystems/nqn.2025-01.io.ssu:m0/namespaces/
@@ -323,6 +350,7 @@ ls /sys/kernel/config/nvmet/subsystems/nqn.2025-01.io.ssu:m0/namespaces/
 
 期望：
 
+- `/dev/ssuN` 存在，`lsblk "$DEV"` 能看到逻辑块设备。
 - `lsblk` 看到约 512M。
 - `/sys/class/block/nvme1n1/size` 是 `1048576`。
 - configfs 下能看到 namespace `1`。
@@ -503,17 +531,17 @@ sudo bash mock/run_mock.sh ./sample_detach_delete ...
 
 ## 当前边界
 
-当前这条 LBC mock 集成路径验证的是控制面：
+当前这条 LBC mock 集成路径已经覆盖到 ReqShim 控制面：
 
 - `ubsectl allocate` 触发 LBC mock create + attach，并返回请求 ID。
 - `ubsectl allocate-result-get` 根据请求 ID 返回 `/dev/ssuN` 逻辑设备路径，并返回每张物理盘对应的 `ssu_id/ns_id/逻辑偏移/长度/LBA`。
-- `ubsectl mount` 建立 `/dev/ssuN -> /dev/nvmeXnY` 的逻辑映射。
-- `ubsectl unmount` 删除逻辑映射。
+- `ubsectl mount` 调 ReqShim `LOGDEV_CREATE/MAP_ADD`，建立 `/dev/ssuN -> /dev/nvmeXnY` 的逻辑映射。
+- `ubsectl unmount` 调 ReqShim `MAP_DEL/LOGDEV_DESTROY`，删除逻辑映射并拆掉 `/dev/ssuN`。
 - `ubsectl free` 触发 LBC mock detach + delete。
 
-也就是说，现在可以用它验证“上游只调 `ubsectl`，底层出现并删除 `/dev/nvmeXnY`”。
+也就是说，现在可以用它验证“上游只调 `ubsectl`，底层出现并删除 `/dev/nvmeXnY`，并由 ReqShim 创建和拆除 `/dev/ssuN`”。
 
-真正对 `/dev/ssu0` 发起数据读写，需要 ReqShim 数据面接入后一起验证。LBC mock 本身已经能产生 `/dev/nvmeXnY`，但当前 LBC mock 快速路径里的 `/dev/ssu0` 逻辑块设备不是 LBC mock 脚本创建的。
+真正对 `/dev/ssuN` 发起读写，需要在有可加载内核模块的真实 Linux 环境里验收。当前仓库内的普通 Meson 测试会用临时目录模拟 LBC mock 脚本，因此会跳过真实 `/dev/ssu-ctl`；真实 `/dev` 环境不会跳过，ReqShim 没加载时 `mount` 会明确失败。
 
 ## 常见问题
 

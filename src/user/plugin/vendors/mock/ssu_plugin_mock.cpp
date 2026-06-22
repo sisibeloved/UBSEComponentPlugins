@@ -1,4 +1,5 @@
 #include "ssu_plugin.h"
+#include "../../reqshim_iface.h"
 
 #include <dirent.h>
 #include <errno.h>
@@ -234,6 +235,51 @@ static mock_mount_t *find_mount(const char *logical_dev)
     }
 
     return NULL;
+}
+
+static ssu_err_t mock_connect(const char *ssu_id, char *out_devname,
+                              size_t n);
+
+static ssu_err_t collect_reqshim_maps(const char *allocate_id,
+                                      ssu_reqshim_map_spec_t *maps,
+                                      uint32_t max_maps,
+                                      uint32_t *out_count)
+{
+    uint32_t count = 0;
+    uint32_t i;
+
+    if (allocate_id == NULL || maps == NULL || out_count == NULL) {
+        return SSU_ERR_INVALID;
+    }
+
+    for (i = 0; i < MOCK_MAX_NAMESPACES; i++) {
+        ssu_err_t err;
+
+        if (!namespaces[i].active ||
+            strcmp(namespaces[i].allocate_id, allocate_id) != 0) {
+            continue;
+        }
+
+        if (count >= max_maps) {
+            return SSU_ERR_NO_RESOURCE;
+        }
+
+        memset(&maps[count], 0, sizeof(maps[count]));
+        err = mock_connect(namespaces[i].ssu_id, maps[count].phys_dev,
+                           sizeof(maps[count].phys_dev));
+        if (err != SSU_OK) {
+            return err;
+        }
+        copy_cstr(maps[count].ns_id, sizeof(maps[count].ns_id),
+                  namespaces[i].ns_id);
+        maps[count].logical_offset = namespaces[i].logical_offset;
+        maps[count].length = namespaces[i].length;
+        maps[count].phys_sector = namespaces[i].phys_sector;
+        count++;
+    }
+
+    *out_count = count;
+    return count == 0 ? SSU_ERR_NOT_FOUND : SSU_OK;
 }
 
 static void insert_index(uint32_t *indexes, uint32_t *count, uint32_t index)
@@ -484,7 +530,10 @@ static ssu_err_t mock_delete_ns(const char *ssu_id, const char *ns_id)
 static ssu_err_t mock_mount(const char *allocate_id, const char *host_id,
                             const char *logical_dev)
 {
+    ssu_reqshim_map_spec_t maps[MOCK_MAX_NAMESPACES];
     mock_mount_t *slot = NULL;
+    uint32_t map_count = 0;
+    ssu_err_t err;
     uint32_t i;
 
     if (allocate_id == NULL || host_id == NULL || logical_dev == NULL) {
@@ -510,6 +559,19 @@ static ssu_err_t mock_mount(const char *allocate_id, const char *host_id,
         return SSU_ERR_NO_RESOURCE;
     }
 
+    memset(maps, 0, sizeof(maps));
+    err = collect_reqshim_maps(allocate_id, maps, MOCK_MAX_NAMESPACES,
+                               &map_count);
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    err = ssu_reqshim_mount_logdev(logical_dev, maps, map_count, 1,
+                                   NULL, NULL, NULL, NULL);
+    if (err != SSU_OK) {
+        return err;
+    }
+
     memset(slot, 0, sizeof(*slot));
     slot->active = 1;
     copy_cstr(slot->allocate_id, sizeof(slot->allocate_id), allocate_id);
@@ -520,7 +582,10 @@ static ssu_err_t mock_mount(const char *allocate_id, const char *host_id,
 
 static ssu_err_t mock_unmount(const char *logical_dev)
 {
+    ssu_reqshim_map_spec_t maps[MOCK_MAX_NAMESPACES];
     mock_mount_t *mount;
+    uint32_t map_count = 0;
+    ssu_err_t err;
 
     if (logical_dev == NULL) {
         return SSU_ERR_INVALID;
@@ -529,6 +594,19 @@ static ssu_err_t mock_unmount(const char *logical_dev)
     mount = find_mount(logical_dev);
     if (mount == NULL) {
         return SSU_ERR_NOT_FOUND;
+    }
+
+    memset(maps, 0, sizeof(maps));
+    err = collect_reqshim_maps(mount->allocate_id, maps, MOCK_MAX_NAMESPACES,
+                               &map_count);
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    err = ssu_reqshim_unmount_logdev(logical_dev, maps, map_count, 1,
+                                     NULL, NULL, NULL, NULL);
+    if (err != SSU_OK) {
+        return err;
     }
 
     memset(mount, 0, sizeof(*mount));

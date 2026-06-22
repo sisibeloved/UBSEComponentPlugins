@@ -1,3 +1,5 @@
+reqshim_iface_sources = files('reqshim_iface.cpp')
+
 subdir('vendors/mock')
 subdir('vendors/lbc_mock')
 

@@ -111,3 +111,26 @@ test(
   reqshim_dataplane_source,
   args: [meson.project_source_root()],
 )
+
+reqshim_control_source = executable(
+  'reqshim_control_source',
+  sources: ['reqshim_control_source.cpp'],
+)
+
+test(
+  'reqshim_control_source',
+  reqshim_control_source,
+  args: [meson.project_source_root()],
+)
+
+reqshim_iface = executable(
+  'reqshim_iface',
+  sources: [
+    'reqshim_iface.cpp',
+    '../../src/user/plugin/reqshim_iface.cpp',
+  ],
+  include_directories: inc,
+  dependencies: [ssu_headers_dep],
+)
+
+test('reqshim_iface', reqshim_iface)

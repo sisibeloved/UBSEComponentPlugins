@@ -1,5 +1,6 @@
 #include "ssu_plugin.h"
 #include "ssu_plugin_lbc_mock.h"
+#include "../../reqshim_iface.h"
 
 #include <dirent.h>
 #include <ctype.h>
@@ -39,7 +40,9 @@ typedef struct {
     char ssu_id[64];
     char ns_id[32];
     char dev_path[256];
+    uint64_t logical_offset;
     uint64_t length;
+    uint64_t phys_sector;
 } lbc_mock_namespace_t;
 
 typedef struct {
@@ -526,6 +529,64 @@ static lbc_mock_mount_t *find_mount(const char *logical_dev)
     return NULL;
 }
 
+static void lbc_mock_reqshim_log(void *ctx, const char *message)
+{
+    (void)ctx;
+    lbc_mock_log("%s", message);
+}
+
+static int lbc_mock_reqshim_allow_missing(void)
+{
+    return strcmp(lbc_config.dev_dir, "/dev") != 0 ||
+           strcmp(lbc_config.configfs_dir,
+                  "/sys/kernel/config/nvmet/subsystems") != 0;
+}
+
+static ssu_err_t collect_reqshim_maps(const char *allocate_id,
+                                      ssu_reqshim_map_spec_t *maps,
+                                      uint32_t max_maps,
+                                      uint32_t *out_count)
+{
+    uint32_t count = 0;
+    uint32_t i;
+
+    if (is_empty_string(allocate_id) || maps == NULL ||
+        out_count == NULL) {
+        return SSU_ERR_INVALID;
+    }
+
+    for (i = 0; i < LBC_MOCK_MAX_NAMESPACES; i++) {
+        if (!namespaces[i].active ||
+            strcmp(namespaces[i].allocate_id, allocate_id) != 0) {
+            continue;
+        }
+
+        if (count >= max_maps) {
+            return SSU_ERR_NO_RESOURCE;
+        }
+
+        if (strlen(namespaces[i].dev_path) >= sizeof(maps[count].phys_dev)) {
+            lbc_mock_log("ReqShim map failed: dev_path too long dev_path=%s max=%zu",
+                         namespaces[i].dev_path,
+                         sizeof(maps[count].phys_dev) - 1);
+            return SSU_ERR_INVALID;
+        }
+
+        memset(&maps[count], 0, sizeof(maps[count]));
+        copy_cstr(maps[count].phys_dev, sizeof(maps[count].phys_dev),
+                  namespaces[i].dev_path);
+        copy_cstr(maps[count].ns_id, sizeof(maps[count].ns_id),
+                  namespaces[i].ns_id);
+        maps[count].logical_offset = namespaces[i].logical_offset;
+        maps[count].length = namespaces[i].length;
+        maps[count].phys_sector = namespaces[i].phys_sector;
+        count++;
+    }
+
+    *out_count = count;
+    return count == 0 ? SSU_ERR_NOT_FOUND : SSU_OK;
+}
+
 ssu_err_t ssu_lbc_mock_configure(const ssu_lbc_mock_config_t *config)
 {
     if (config == NULL || is_empty_string(config->prefix)) {
@@ -768,7 +829,9 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
     copy_cstr(slot->ssu_id, sizeof(slot->ssu_id), extent_req->ssu_id);
     copy_cstr(slot->ns_id, sizeof(slot->ns_id), ns_id);
     copy_cstr(slot->dev_path, sizeof(slot->dev_path), dev_path);
+    slot->logical_offset = extent_req->logical_offset;
     slot->length = extent_req->length;
+    slot->phys_sector = 0;
 
     copy_cstr(out_ns_id, n, ns_id);
     *out_phys_sector = 0;
@@ -837,8 +900,13 @@ static ssu_err_t lbc_mock_delete_ns(const char *ssu_id, const char *ns_id)
 static ssu_err_t lbc_mock_mount(const char *allocate_id, const char *host_id,
                                 const char *logical_dev)
 {
+    ssu_reqshim_map_spec_t maps[LBC_MOCK_MAX_NAMESPACES];
     lbc_mock_mount_t *slot = NULL;
+    uint32_t map_count = 0;
+    ssu_err_t err;
     uint32_t i;
+
+    ensure_config_loaded();
 
     if (is_empty_string(allocate_id) || is_empty_string(host_id) ||
         is_empty_string(logical_dev)) {
@@ -876,6 +944,25 @@ static ssu_err_t lbc_mock_mount(const char *allocate_id, const char *host_id,
         return SSU_ERR_NO_RESOURCE;
     }
 
+    memset(maps, 0, sizeof(maps));
+    err = collect_reqshim_maps(allocate_id, maps, LBC_MOCK_MAX_NAMESPACES,
+                               &map_count);
+    if (err != SSU_OK) {
+        lbc_mock_log("mount failed: build ReqShim maps failed allocate_id=%s err=%d",
+                     allocate_id, err);
+        return err;
+    }
+
+    err = ssu_reqshim_mount_logdev(logical_dev, maps, map_count,
+                                   lbc_mock_reqshim_allow_missing(),
+                                   lbc_mock_reqshim_log, NULL,
+                                   NULL, NULL);
+    if (err != SSU_OK) {
+        lbc_mock_log("mount failed: ReqShim mount failed allocate_id=%s logical_dev=%s err=%d",
+                     allocate_id, logical_dev, err);
+        return err;
+    }
+
     memset(slot, 0, sizeof(*slot));
     slot->active = 1;
     copy_cstr(slot->allocate_id, sizeof(slot->allocate_id), allocate_id);
@@ -888,7 +975,12 @@ static ssu_err_t lbc_mock_mount(const char *allocate_id, const char *host_id,
 
 static ssu_err_t lbc_mock_unmount(const char *logical_dev)
 {
+    ssu_reqshim_map_spec_t maps[LBC_MOCK_MAX_NAMESPACES];
     lbc_mock_mount_t *mount;
+    uint32_t map_count = 0;
+    ssu_err_t err;
+
+    ensure_config_loaded();
 
     if (is_empty_string(logical_dev)) {
         lbc_mock_log("unmount failed: invalid logical_dev=%s",
@@ -902,6 +994,25 @@ static ssu_err_t lbc_mock_unmount(const char *logical_dev)
         lbc_mock_log("unmount failed: logical device not found logical_dev=%s",
                      logical_dev);
         return SSU_ERR_NOT_FOUND;
+    }
+
+    memset(maps, 0, sizeof(maps));
+    err = collect_reqshim_maps(mount->allocate_id, maps,
+                               LBC_MOCK_MAX_NAMESPACES, &map_count);
+    if (err != SSU_OK) {
+        lbc_mock_log("unmount failed: build ReqShim maps failed allocate_id=%s logical_dev=%s err=%d",
+                     mount->allocate_id, logical_dev, err);
+        return err;
+    }
+
+    err = ssu_reqshim_unmount_logdev(logical_dev, maps, map_count,
+                                     lbc_mock_reqshim_allow_missing(),
+                                     lbc_mock_reqshim_log, NULL,
+                                     NULL, NULL);
+    if (err != SSU_OK) {
+        lbc_mock_log("unmount failed: ReqShim unmount failed allocate_id=%s logical_dev=%s err=%d",
+                     mount->allocate_id, logical_dev, err);
+        return err;
     }
 
     lbc_mock_log("unmount success logical_dev=%s allocate_id=%s host_id=%s",
