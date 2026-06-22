@@ -134,3 +134,23 @@ reqshim_iface = executable(
 )
 
 test('reqshim_iface', reqshim_iface)
+
+runtime_error_hints = executable(
+  'runtime_error_hints',
+  sources: ['runtime_error_hints.cpp'],
+  include_directories: inc,
+  dependencies: [ssu_headers_dep],
+)
+
+test('runtime_error_hints', runtime_error_hints)
+
+reqshim_build_script = find_program('sh')
+
+test(
+  'reqshim_build_script',
+  reqshim_build_script,
+  args: [
+    files('reqshim_build_script.sh'),
+    meson.project_source_root(),
+  ],
+)

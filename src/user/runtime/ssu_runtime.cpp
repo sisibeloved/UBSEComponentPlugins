@@ -166,6 +166,12 @@ static const char *operation_error_hint(const char *plugin_name,
             return "lbc_mock create/attach command failed. Check ssu-mgr stderr and /tmp/ubse-lbc-mock.log for the exact script and exit status.";
         }
 
+        if ((strcmp(operation, "mount") == 0 ||
+             strcmp(operation, "unmount") == 0) &&
+            err == SSU_ERR_KERNEL) {
+            return "lbc_mock failed to program ReqShim. Check that ssu_reqshim.ko is loaded and /dev/ssu-ctl exists; see ssu-mgr stderr and /tmp/ubse-lbc-mock.log for the failing ReqShim open/ioctl errno.";
+        }
+
         if (err == SSU_ERR_NOT_FOUND) {
             return "lbc_mock did not find the requested SSU, allocation, namespace, or logical device. Check query output and /tmp/ubse-lbc-mock.log.";
         }

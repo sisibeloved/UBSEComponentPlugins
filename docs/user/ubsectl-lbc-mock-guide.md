@@ -104,7 +104,64 @@ physical_disk_count=0  # allocate 默认单张物理盘
 logical_disk_aggregate=on
 ```
 
-如果没有加载 ReqShim，真实 `/dev` 环境下 `mount` 会失败，并在 `ssu-mgr` 终端和 `/tmp/ubse-lbc-mock.log` 里看到 `/dev/ssu-ctl` 打开失败的信息。这种情况下 `allocate` 仍可能成功，因为 LBC mock 已经创建了 `/dev/nvmeXnY`，但还没有把它挂成 `/dev/ssuN`。
+如果没有加载 ReqShim，真实 `/dev` 环境下 `mount` 会失败，`ubsectl` 会返回 `mount failed: SSU_ERR_KERNEL (-6)`，并提示检查 `/dev/ssu-ctl`。`ssu-mgr` 终端和 `/tmp/ubse-lbc-mock.log` 里会看到类似 `ReqShim open failed ctl=/dev/ssu-ctl errno=2` 的信息。这种情况下 `allocate` 仍可能成功，因为 LBC mock 已经创建了 `/dev/nvmeXnY`，但还没有把它挂成 `/dev/ssuN`。
+
+## ReqShim 模块怎么构建和加载
+
+ReqShim 是内核模块，必须使用当前正在运行的内核对应的构建目录。先检查：
+
+```bash
+uname -r
+ls /lib/modules/$(uname -r)/build
+```
+
+如果这个目录不存在，说明当前机器缺少匹配的 kernel headers/kernel-devel，模块无法在这台机器上直接构建。
+
+构建：
+
+```bash
+meson setup build-lbc-kernel \
+    -Dvendor=lbc_mock \
+    -Dbuild_kernel=enabled \
+    -Dkernel_src_dir=/lib/modules/$(uname -r)/build
+
+meson compile -C build-lbc-kernel
+```
+
+加载：
+
+```bash
+sudo insmod build-lbc-kernel/src/kernel/reqshim/ssu_reqshim.ko
+lsmod | grep ssu_reqshim
+ls -l /dev/ssu-ctl
+```
+
+看到 `/dev/ssu-ctl` 后，再执行 `ubsectl mount`。如果加载失败，先看：
+
+```bash
+sudo dmesg | tail -n 80
+```
+
+卸载前要先解挂所有 `/dev/ssuN`：
+
+```bash
+sudo ./build-lbc/tools/ubsectl unmount --dev /dev/ssu0
+sudo rmmod ssu_reqshim
+```
+
+当前 ReqShim 已经实现了 MVP 数据面的基础闭环：
+
+- 注册 `/dev/ssu-ctl` 控制设备。
+- 支持 `GET_VERSION`、`LOGDEV_CREATE`、`LOGDEV_DESTROY`、`MAP_ADD`、`MAP_DEL`、`MAP_QUERY` ioctl。
+- `LOGDEV_CREATE` 后创建 `/dev/ssuN` 逻辑块设备。
+- 对 `/dev/ssuN` 的普通 read/write 请求，根据映射表找到物理设备和 LBA。
+- 当前提交到底层物理设备使用普通 block/bio 路径。
+
+当前还不是最终完整版：
+
+- 只支持普通 read/write，不支持 flush/discard/write zeroes 等扩展请求。
+- `/dev/nvme*` 后端已经有识别边界，但还没有真正组装 NVMe 命令并直投 NVMe/LBC INI 队列。
+- 还没有实现 SGL/URMA、多流、NDS、多副本/EC 等后续能力。
 
 ## 逻辑 API 参数怎么理解
 
@@ -487,7 +544,8 @@ sudo tail -n 50 /tmp/ubse-lbc-mock.log
 
 | 错误 | 常见原因 | 处理方式 |
 | ---- | ---- | ---- |
-| `SSU_ERR_NO_RESOURCE` | `--physical-disks N` 超过当前可用物理盘，或池里没有 ONLINE 资源 | 先 `ubsectl list` 看资源数；LBC mock 默认只有 1 个 SSU |
+| `SSU_ERR_NO_RESOURCE` | `--physical-disks N` 超过当前可用物理盘，或池里没有 ONLINE 资源 | 先 `ubsectl list` 看资源数；LBC mock 默认有 3 个 SSU |
+| `SSU_ERR_KERNEL` | `mount/unmount` 调 ReqShim 失败，常见是 `/dev/ssu-ctl` 不存在 | 先 `ls -l /dev/ssu-ctl`；如果不存在，加载 `ssu_reqshim.ko`；再看 `ssu-mgr` 终端和 `/tmp/ubse-lbc-mock.log` 里的 errno |
 | `SSU_ERR_UNSUPPORTED` | 使用了 `--no-aggregate`，或请求了当前阶段未启用能力 | 快速验证保持默认聚合；未启用能力不要当成成功路径 |
 | `SSU_ERR_NOT_FOUND` | request id、设备路径、namespace 或 LBC mock 生成的 `/dev/nvmeXnY` 找不到 | 检查 `RID`、`DEV` 是否取对，查看 `query --type logdev` 和 `/tmp/ubse-lbc-mock.log` |
 | `mount/free` 参数异常 | 老脚本把 `allocate-result-get` 的多行输出整体当成设备路径 | 用 `sed -n '1p'` 只取第一行作为 `DEV` |
