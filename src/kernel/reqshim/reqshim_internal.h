@@ -1,7 +1,9 @@
 #ifndef SSU_REQSHIM_INTERNAL_H
 #define SSU_REQSHIM_INTERNAL_H
 
+#include <linux/blk_types.h>
 #include <linux/fs.h>
+#include <linux/mm_types.h>
 
 #include "reqshim_uapi.h"
 
@@ -10,6 +12,9 @@
 
 long ssu_reqshim_ioctl(struct file *file, unsigned int cmd,
                        unsigned long arg);
+
+int ssu_reqshim_blk_init(void);
+void ssu_reqshim_blk_exit(void);
 
 int ssu_reqshim_logdev_create(const struct ssu_logdev_req *req);
 int ssu_reqshim_logdev_destroy(const struct ssu_logdev_req *req);
@@ -32,5 +37,12 @@ enum ssu_reqshim_phys_backend {
 
 enum ssu_reqshim_phys_backend ssu_reqshim_phys_backend_for_entry(
     const struct ssu_map_entry *entry);
+
+blk_status_t ssu_reqshim_phys_submit_bvec(const struct ssu_map_entry *entry,
+                                          sector_t phys_sector,
+                                          blk_opf_t opf,
+                                          struct page *page,
+                                          unsigned int len,
+                                          unsigned int offset);
 
 #endif

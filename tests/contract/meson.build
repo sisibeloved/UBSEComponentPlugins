@@ -100,3 +100,14 @@ dataplane_mock = executable(
 )
 
 test('dataplane_mock', dataplane_mock)
+
+reqshim_dataplane_source = executable(
+  'reqshim_dataplane_source',
+  sources: ['reqshim_dataplane_source.cpp'],
+)
+
+test(
+  'reqshim_dataplane_source',
+  reqshim_dataplane_source,
+  args: [meson.project_source_root()],
+)

@@ -24,17 +24,30 @@ static struct miscdevice ssu_reqshim_misc = {
 
 static int __init ssu_reqshim_init(void)
 {
-    return misc_register(&ssu_reqshim_misc);
+    int err;
+
+    err = ssu_reqshim_blk_init();
+    if (err)
+        return err;
+
+    err = misc_register(&ssu_reqshim_misc);
+    if (err) {
+        ssu_reqshim_blk_exit();
+        return err;
+    }
+
+    return 0;
 }
 
 static void __exit ssu_reqshim_exit(void)
 {
     misc_deregister(&ssu_reqshim_misc);
+    ssu_reqshim_blk_exit();
 }
 
 module_init(ssu_reqshim_init);
 module_exit(ssu_reqshim_exit);
 
 MODULE_AUTHOR("UBSEComponentPlugins");
-MODULE_DESCRIPTION("SSU ReqShim control plane");
+MODULE_DESCRIPTION("SSU ReqShim block data plane");
 MODULE_LICENSE("GPL");
