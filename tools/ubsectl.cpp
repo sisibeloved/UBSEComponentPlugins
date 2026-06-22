@@ -13,12 +13,21 @@
 
 #define RESPONSE_SIZE 8192U
 #define DEFAULT_MANAGER_SOCKET "/tmp/ubse-ssu-mgr.fifo"
+#define MAX_CLI_HOSTS 32U
 
 static void usage(void)
 {
-    puts("usage: ubsectl <alloc|mount|unmount|release|query>");
+    puts("usage: ubsectl <allocate|free|list|allocate-result-get|mount|unmount>");
+    puts("       ubsectl allocate --size BYTES [--tenant TENANT] [--shards N] [--aggregate|--no-aggregate] [--share exclusive|shared] [--host HOST] [--out FILE]");
+    puts("       ubsectl allocate-result-get --request-id ID [--out FILE]");
+    puts("       ubsectl free --dev /dev/ssuN");
+    puts("       ubsectl list");
+    puts("");
+    puts("compat:");
+    puts("       ubsectl <alloc|mount|unmount|release|query>");
     puts("       ubsectl alloc --size BYTES --stripe|--replica N [--out FILE]");
     puts("       ubsectl mount --aid AID --host HOST --dev /dev/ssuN");
+    puts("       ubsectl mount --dev /dev/ssuN --host HOST");
     puts("       ubsectl unmount --dev /dev/ssuN");
     puts("       ubsectl release --aid AID");
     puts("       ubsectl query --type pool|allocation|logdev");
@@ -125,6 +134,55 @@ static int parse_size(const char *s, uint64_t *out)
     }
 
     *out = (uint64_t)value * multiplier;
+    return 1;
+}
+
+static int parse_share_type(const char *s, ssu_share_type_t *out)
+{
+    if (s == NULL || out == NULL) {
+        return 0;
+    }
+
+    if (strcmp(s, "exclusive") == 0) {
+        *out = SSU_SHARE_EXCLUSIVE;
+        return 1;
+    }
+
+    if (strcmp(s, "shared") == 0) {
+        *out = SSU_SHARE_SHARED;
+        return 1;
+    }
+
+    return 0;
+}
+
+static int build_host_list(char *buf, size_t n,
+                           const char *const *hosts, uint32_t host_count)
+{
+    size_t used = 0;
+    uint32_t i;
+
+    if (buf == NULL || n == 0 || hosts == NULL || host_count == 0) {
+        return 0;
+    }
+
+    buf[0] = '\0';
+    for (i = 0; i < host_count; i++) {
+        int rc;
+
+        if (is_empty_string(hosts[i]) || strchr(hosts[i], ' ') != NULL ||
+            strchr(hosts[i], ',') != NULL) {
+            return 0;
+        }
+
+        rc = snprintf(buf + used, n - used, "%s%s",
+                      i == 0 ? "" : ",", hosts[i]);
+        if (rc < 0 || (size_t)rc >= n - used) {
+            return 0;
+        }
+        used += (size_t)rc;
+    }
+
     return 1;
 }
 
@@ -531,6 +589,27 @@ static int cmd_query(int argc, char **argv)
     return 1;
 }
 
+static int cmd_list(int argc, char **argv)
+{
+    char response[RESPONSE_SIZE];
+
+    (void)argv;
+
+    if (argc != 2) {
+        usage();
+        return 1;
+    }
+
+    if (manager_socket_path() != NULL) {
+        if (!manager_request("LIST", response, sizeof(response))) {
+            return 1;
+        }
+        return print_manager_response(response, NULL);
+    }
+
+    return print_pool();
+}
+
 static int write_alloc_output(const char *allocate_id, const char *out_path)
 {
     FILE *fp;
@@ -549,6 +628,192 @@ static int write_alloc_output(const char *allocate_id, const char *out_path)
     fprintf(fp, "%s\n", allocate_id);
     fclose(fp);
     return 0;
+}
+
+static int cmd_allocate(int argc, char **argv)
+{
+    ssu_api_allocate_req_t req = {};
+    ssu_api_allocate_resp_t out;
+    const char *hosts[MAX_CLI_HOSTS];
+    uint32_t host_count = 0;
+    const char *out_path = NULL;
+    const char *tenant = "default";
+    char host_list[256];
+    char command[512];
+    char response[RESPONSE_SIZE];
+    int i;
+    ssu_err_t err;
+
+    req.shard_count = 1;
+    req.logical_disk_aggregate = 1;
+    req.allocation_type = SSU_SHARE_EXCLUSIVE;
+
+    memset(hosts, 0, sizeof(hosts));
+    for (i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--size") == 0) {
+            if (i + 1 >= argc || !parse_size(argv[i + 1], &req.size_bytes)) {
+                usage();
+                return 1;
+            }
+            i++;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--tenant") == 0) {
+            if (i + 1 >= argc || is_empty_string(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            tenant = argv[++i];
+            continue;
+        }
+
+        if (strcmp(argv[i], "--shards") == 0) {
+            if (i + 1 >= argc) {
+                usage();
+                return 1;
+            }
+            req.shard_count = (uint32_t)strtoul(argv[i + 1], NULL, 10);
+            i++;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--aggregate") == 0) {
+            req.logical_disk_aggregate = 1;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--no-aggregate") == 0) {
+            req.logical_disk_aggregate = 0;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--share") == 0) {
+            if (i + 1 >= argc ||
+                !parse_share_type(argv[i + 1], &req.allocation_type)) {
+                usage();
+                return 1;
+            }
+            i++;
+            continue;
+        }
+
+        if (strcmp(argv[i], "--host") == 0) {
+            if (i + 1 >= argc || host_count >= MAX_CLI_HOSTS ||
+                is_empty_string(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            hosts[host_count++] = argv[++i];
+            continue;
+        }
+
+        if (strcmp(argv[i], "--out") == 0) {
+            if (i + 1 >= argc) {
+                usage();
+                return 1;
+            }
+            out_path = argv[++i];
+            continue;
+        }
+
+        usage();
+        return 1;
+    }
+
+    if (host_count == 0) {
+        hosts[host_count++] = "local";
+    }
+
+    req.tenant_id = tenant;
+    req.host_ids = hosts;
+    req.host_count = host_count;
+
+    if (manager_socket_path() != NULL) {
+        if (!build_host_list(host_list, sizeof(host_list), hosts,
+                             host_count)) {
+            usage();
+            return 1;
+        }
+        snprintf(command, sizeof(command), "ALLOCATE %llu %d %u %d %s %s",
+                 (unsigned long long)req.size_bytes,
+                 (int)req.allocation_type,
+                 req.shard_count,
+                 req.logical_disk_aggregate,
+                 is_empty_string(tenant) ? "-" : tenant,
+                 host_list);
+        if (!manager_request(command, response, sizeof(response))) {
+            return 1;
+        }
+        return print_manager_response(response, out_path);
+    }
+
+    memset(&out, 0, sizeof(out));
+    err = ssu_api_allocate(&req, &out);
+    if (err != SSU_OK) {
+        print_operation_error("allocate", err);
+        return 1;
+    }
+
+    return write_alloc_output(out.request_id, out_path);
+}
+
+static int cmd_allocate_result_get(int argc, char **argv)
+{
+    const char *request_id = NULL;
+    const char *out_path = NULL;
+    ssu_api_allocate_result_info_t result;
+    char command[128];
+    char response[RESPONSE_SIZE];
+    int i;
+    ssu_err_t err;
+
+    for (i = 2; i < argc; i++) {
+        if ((strcmp(argv[i], "--request-id") == 0 ||
+             strcmp(argv[i], "--rid") == 0) && i + 1 < argc) {
+            request_id = argv[++i];
+            continue;
+        }
+
+        if (strcmp(argv[i], "--out") == 0 && i + 1 < argc) {
+            out_path = argv[++i];
+            continue;
+        }
+
+        if (request_id == NULL) {
+            request_id = argv[i];
+            continue;
+        }
+
+        usage();
+        return 1;
+    }
+
+    if (is_empty_string(request_id)) {
+        usage();
+        return 1;
+    }
+
+    if (manager_socket_path() != NULL) {
+        snprintf(command, sizeof(command), "ALLOCATE_RESULT %s",
+                 request_id);
+        if (!manager_request(command, response, sizeof(response))) {
+            return 1;
+        }
+        return print_manager_response(response, out_path);
+    }
+
+    memset(&result, 0, sizeof(result));
+    err = ssu_api_allocate_result_get(request_id, &result);
+    if (err != SSU_OK) {
+        print_operation_error("allocate-result-get", err);
+        if (!is_empty_string(result.error_message)) {
+            fprintf(stderr, "detail: %s\n", result.error_message);
+        }
+        return 1;
+    }
+
+    return write_alloc_output(result.device_path, out_path);
 }
 
 static int cmd_alloc(int argc, char **argv)
@@ -598,11 +863,7 @@ static int cmd_alloc(int argc, char **argv)
                 usage();
                 return 1;
             }
-            if (strcmp(argv[i + 1], "exclusive") == 0) {
-                req.share_type = SSU_SHARE_EXCLUSIVE;
-            } else if (strcmp(argv[i + 1], "shared") == 0) {
-                req.share_type = SSU_SHARE_SHARED;
-            } else {
+            if (!parse_share_type(argv[i + 1], &req.share_type)) {
                 usage();
                 return 1;
             }
@@ -672,22 +933,30 @@ static int cmd_mount(int argc, char **argv)
         return 1;
     }
 
-    if (is_empty_string(req.allocate_id) || is_empty_string(req.host_id) ||
-        is_empty_string(req.logical_dev)) {
+    if (is_empty_string(req.host_id) || is_empty_string(req.logical_dev)) {
         usage();
         return 1;
     }
 
     if (manager_socket_path() != NULL) {
-        snprintf(command, sizeof(command), "MOUNT %s %s %s",
-                 req.allocate_id, req.host_id, req.logical_dev);
+        if (is_empty_string(req.allocate_id)) {
+            snprintf(command, sizeof(command), "MOUNT_DEV %s %s",
+                     req.logical_dev, req.host_id);
+        } else {
+            snprintf(command, sizeof(command), "MOUNT %s %s %s",
+                     req.allocate_id, req.host_id, req.logical_dev);
+        }
         if (!manager_request(command, response, sizeof(response))) {
             return 1;
         }
         return print_manager_response(response, NULL);
     }
 
-    err = ssu_resource_mount(&req);
+    if (is_empty_string(req.allocate_id)) {
+        err = ssu_api_mount(req.logical_dev, req.host_id);
+    } else {
+        err = ssu_resource_mount(&req);
+    }
     if (err != SSU_OK) {
         print_operation_error("mount", err);
         return 1;
@@ -785,11 +1054,71 @@ static int cmd_release(int argc, char **argv)
     return 0;
 }
 
+static int cmd_free(int argc, char **argv)
+{
+    const char *logical_dev = NULL;
+    char command[128];
+    char response[RESPONSE_SIZE];
+    int i;
+    ssu_err_t err;
+
+    for (i = 2; i < argc; i++) {
+        if (strcmp(argv[i], "--dev") == 0 && i + 1 < argc) {
+            logical_dev = argv[++i];
+            continue;
+        }
+        if (logical_dev == NULL) {
+            logical_dev = argv[i];
+            continue;
+        }
+        usage();
+        return 1;
+    }
+
+    if (is_empty_string(logical_dev)) {
+        usage();
+        return 1;
+    }
+
+    if (manager_socket_path() != NULL) {
+        snprintf(command, sizeof(command), "FREE %s", logical_dev);
+        if (!manager_request(command, response, sizeof(response))) {
+            return 1;
+        }
+        return print_manager_response(response, NULL);
+    }
+
+    err = ssu_api_free(logical_dev);
+    if (err != SSU_OK) {
+        print_operation_error("free", err);
+        return 1;
+    }
+
+    printf("freed %s\n", logical_dev);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 2) {
         usage();
         return 1;
+    }
+
+    if (strcmp(argv[1], "allocate") == 0) {
+        return cmd_allocate(argc, argv);
+    }
+
+    if (strcmp(argv[1], "allocate-result-get") == 0) {
+        return cmd_allocate_result_get(argc, argv);
+    }
+
+    if (strcmp(argv[1], "list") == 0) {
+        return cmd_list(argc, argv);
+    }
+
+    if (strcmp(argv[1], "free") == 0) {
+        return cmd_free(argc, argv);
     }
 
     if (strcmp(argv[1], "alloc") == 0) {

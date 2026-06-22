@@ -7,7 +7,7 @@
 1. 构建一个 `lbc_mock` 版本。
 2. 启动一个常驻的 `ssu-mgr`。
 3. 让 `ubsectl` 连接这个 `ssu-mgr`。
-4. 后续只用 `ubsectl alloc/mount/query/unmount/release`。
+4. 后续只用 `ubsectl allocate/list/allocate-result-get/mount/unmount/free`。
 
 ## 一句话结论
 
@@ -48,25 +48,28 @@ sudo env LBC_PREFIX="$LBC_PREFIX" \
 第二个终端只调用 `ubsectl`：
 
 ```bash
-sudo ./build-lbc/tools/ubsectl query --type pool
+sudo ./build-lbc/tools/ubsectl list
 
-sudo ./build-lbc/tools/ubsectl alloc \
+sudo ./build-lbc/tools/ubsectl allocate \
     --size 512M \
-    --stripe \
+    --tenant tenant-demo \
+    --shards 1 \
+    --aggregate \
     --share exclusive \
-    --out /tmp/ssu-aid
+    --host local \
+    --out /tmp/ssu-rid
 
-AID=$(cat /tmp/ssu-aid)
+RID=$(cat /tmp/ssu-rid)
+DEV=$(sudo ./build-lbc/tools/ubsectl allocate-result-get --request-id "$RID")
 
 sudo ./build-lbc/tools/ubsectl mount \
-    --aid "$AID" \
-    --host local \
-    --dev /dev/ssu0
+    --dev "$DEV" \
+    --host local
 
 sudo ./build-lbc/tools/ubsectl query --type logdev
 
-sudo ./build-lbc/tools/ubsectl unmount --dev /dev/ssu0
-sudo ./build-lbc/tools/ubsectl release --aid "$AID"
+sudo ./build-lbc/tools/ubsectl unmount --dev "$DEV"
+sudo ./build-lbc/tools/ubsectl free --dev "$DEV"
 ```
 
 默认值如下：
@@ -90,7 +93,7 @@ log_file=/tmp/ubse-lbc-mock.log
 
 - `ssu-mgr` 是常驻进程，负责保存分配、挂载、namespace、设备路径这些运行时状态。
 - `ubsectl` 是命令行工具，执行完一条命令就退出。
-- 所以 `ubsectl alloc`、`ubsectl mount`、`ubsectl release` 必须发给同一个 `ssu-mgr`，才能共享同一份状态。
+- 所以 `ubsectl allocate`、`ubsectl mount`、`ubsectl free` 必须发给同一个 `ssu-mgr`，才能共享同一份状态。
 
 默认入口是：
 
@@ -111,7 +114,7 @@ sudo env LBC_PREFIX="$LBC_PREFIX" \
 
 ```bash
 sudo env SSU_MGR_SOCKET="$SSU_SOCKET" \
-    ./build-lbc/tools/ubsectl query --type pool
+    ./build-lbc/tools/ubsectl list
 ```
 
 如果不设置 `SSU_MGR_SOCKET`，`ubsectl` 会自动尝试默认入口 `/tmp/ubse-ssu-mgr.fifo`。如果默认入口也不存在，才会退回直接调用模式。
@@ -202,7 +205,7 @@ sudo env LBC_PREFIX="$LBC_PREFIX" \
 另开一个终端。下面所有命令都只调用 `ubsectl`，不直接碰 LBC mock 脚本：
 
 ```bash
-sudo ./build-lbc/tools/ubsectl query --type pool
+sudo ./build-lbc/tools/ubsectl list
 ```
 
 看到类似输出就说明 `ubsectl -> ssu-mgr -> LBC mock plugin` 这条控制面通了：
@@ -215,22 +218,37 @@ lbc-mock-ssu0 lbc-mock-host0 ONLINE 0/536870912
 申请 512 MiB 空间：
 
 ```bash
-sudo ./build-lbc/tools/ubsectl alloc \
+sudo ./build-lbc/tools/ubsectl allocate \
     --size 512M \
-    --stripe \
+    --tenant tenant-demo \
+    --shards 1 \
+    --aggregate \
     --share exclusive \
-    --out /tmp/ssu-aid
+    --host local \
+    --out /tmp/ssu-rid
 
-AID=$(cat /tmp/ssu-aid)
+RID=$(cat /tmp/ssu-rid)
 ```
 
-挂载成逻辑设备名：
+获取这次分配对应的逻辑设备路径：
+
+```bash
+DEV=$(sudo ./build-lbc/tools/ubsectl allocate-result-get --request-id "$RID")
+echo "$DEV"
+```
+
+输出类似：
+
+```text
+/dev/ssu0
+```
+
+挂载成逻辑设备：
 
 ```bash
 sudo ./build-lbc/tools/ubsectl mount \
-    --aid "$AID" \
-    --host local \
-    --dev /dev/ssu0
+    --dev "$DEV" \
+    --host local
 ```
 
 查看逻辑设备到真实 NVMe namespace 的映射：
@@ -266,9 +284,9 @@ ls /sys/kernel/config/nvmet/subsystems/nqn.2025-01.io.ssu:m0/namespaces/
 解挂载并释放：
 
 ```bash
-sudo ./build-lbc/tools/ubsectl unmount --dev /dev/ssu0
+sudo ./build-lbc/tools/ubsectl unmount --dev "$DEV"
 
-sudo ./build-lbc/tools/ubsectl release --aid "$AID"
+sudo ./build-lbc/tools/ubsectl free --dev "$DEV"
 ```
 
 释放后再确认：
@@ -340,10 +358,11 @@ sudo bash mock/run_mock.sh ./sample_detach_delete ...
 
 当前这条 LBC mock 集成路径验证的是控制面：
 
-- `ubsectl alloc` 触发 LBC mock create + attach。
-- `ubsectl mount` 建立 `/dev/ssu0 -> /dev/nvmeXnY` 的逻辑映射。
+- `ubsectl allocate` 触发 LBC mock create + attach，并返回请求 ID。
+- `ubsectl allocate-result-get` 根据请求 ID 返回 `/dev/ssuN` 逻辑设备路径。
+- `ubsectl mount` 建立 `/dev/ssuN -> /dev/nvmeXnY` 的逻辑映射。
 - `ubsectl unmount` 删除逻辑映射。
-- `ubsectl release` 触发 LBC mock detach + delete。
+- `ubsectl free` 触发 LBC mock detach + delete。
 
 也就是说，现在可以用它验证“上游只调 `ubsectl`，底层出现并删除 `/dev/nvmeXnY`”。
 
@@ -353,9 +372,9 @@ sudo bash mock/run_mock.sh ./sample_detach_delete ...
 
 ### 我能不能只运行 ubsectl，不启动 ssu-mgr？
 
-不建议。单条 `query --type pool` 可能能看到资源，但完整生命周期不行。
+不建议。单条 `list` 可能能看到资源，但完整生命周期不行。
 
-原因很简单：不连 `ssu-mgr` 时，每条 `ubsectl` 都是一个新的短进程，上一条命令创建的分配状态不会留给下一条命令。`alloc -> mount -> release` 这种流程必须通过常驻 `ssu-mgr`。
+原因很简单：不连 `ssu-mgr` 时，每条 `ubsectl` 都是一个新的短进程，上一条命令创建的分配状态不会留给下一条命令。`allocate -> mount -> free` 这种流程必须通过常驻 `ssu-mgr`。
 
 ### 为什么 ubsectl 需要 sudo？
 

@@ -5,15 +5,16 @@ build_dir=${1:?build directory required}
 source_dir=${2:?source directory required}
 socket="/tmp/ubse-ssu-mgr-$$.sock"
 aid_file="$build_dir/tests/mvp2/aid"
+rid_file="$build_dir/tests/mvp2/rid"
 ubsectl="$build_dir/tools/ubsectl"
 ssu_mgr="$build_dir/src/user/runtime/ssu-mgr"
 config="$source_dir/tests/mvp2/ssu.conf"
 
-rm -f "$socket" "$aid_file"
+rm -f "$socket" "$aid_file" "$rid_file"
 
 SSU_MOCK_SSU_COUNT=1 "$ssu_mgr" --role=manager --config "$config" --socket "$socket" &
 mgr_pid=$!
-trap 'kill "$mgr_pid" 2>/dev/null || true; rm -f "$socket" "$aid_file"' EXIT
+trap 'kill "$mgr_pid" 2>/dev/null || true; rm -f "$socket" "$aid_file" "$rid_file"' EXIT
 
 i=0
 while [ ! -p "$socket" ]; do
@@ -50,5 +51,37 @@ fi
 
 if SSU_MGR_SOCKET="$socket" "$ubsectl" alloc --size 8192 --replica 3; then
     echo "replica alloc should be unsupported" >&2
+    exit 1
+fi
+
+SSU_MGR_SOCKET="$socket" "$ubsectl" list | grep -q '^pool entries: 1'
+
+SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
+    --size 8192 \
+    --tenant tenant-cli \
+    --shards 1 \
+    --aggregate \
+    --share exclusive \
+    --host local \
+    --out "$rid_file"
+rid=$(cat "$rid_file")
+test "$rid" = "alloc-1"
+
+dev=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$rid")
+test "$dev" = "/dev/ssu1"
+
+SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev | grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]"
+
+if SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"; then
+    echo "free while mounted should fail" >&2
+    exit 1
+fi
+
+SSU_MGR_SOCKET="$socket" "$ubsectl" unmount --dev "$dev"
+SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"
+
+if SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation | grep -q "^$rid[[:space:]]"; then
+    echo "freed logical allocation should not remain active" >&2
     exit 1
 fi

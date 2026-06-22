@@ -416,6 +416,79 @@ static ssu_err_t handle_alloc(char *save, char *body, size_t n)
     return SSU_OK;
 }
 
+static ssu_err_t handle_allocate(char *save, char *body, size_t n)
+{
+    char *size_s = strtok_r(NULL, " ", &save);
+    char *share_s = strtok_r(NULL, " ", &save);
+    char *shards_s = strtok_r(NULL, " ", &save);
+    char *aggregate_s = strtok_r(NULL, " ", &save);
+    char *tenant_s = strtok_r(NULL, " ", &save);
+    char *hosts_s = strtok_r(NULL, " ", &save);
+    const char *hosts[32];
+    char *host_save = NULL;
+    char *host;
+    ssu_api_allocate_req_t req;
+    ssu_api_allocate_resp_t result;
+    ssu_err_t err;
+
+    if (size_s == NULL || share_s == NULL || shards_s == NULL ||
+        aggregate_s == NULL || tenant_s == NULL || hosts_s == NULL) {
+        snprintf(body, n, "invalid ALLOCATE command\n");
+        return SSU_ERR_INVALID;
+    }
+
+    memset(&req, 0, sizeof(req));
+    memset(hosts, 0, sizeof(hosts));
+    host = strtok_r(hosts_s, ",", &host_save);
+    while (host != NULL) {
+        if (req.host_count >= 32U) {
+            snprintf(body, n, "too many hosts in ALLOCATE command\n");
+            return SSU_ERR_INVALID;
+        }
+        hosts[req.host_count++] = host;
+        host = strtok_r(NULL, ",", &host_save);
+    }
+
+    req.size_bytes = (uint64_t)strtoull(size_s, NULL, 10);
+    req.allocation_type = (ssu_share_type_t)strtol(share_s, NULL, 10);
+    req.shard_count = (uint32_t)strtoul(shards_s, NULL, 10);
+    req.logical_disk_aggregate = (int)strtol(aggregate_s, NULL, 10);
+    req.tenant_id = strcmp(tenant_s, "-") == 0 ? NULL : tenant_s;
+    req.host_ids = hosts;
+
+    memset(&result, 0, sizeof(result));
+    err = ssu_api_allocate(&req, &result);
+    if (err != SSU_OK) {
+        format_operation_error(body, n, "allocate", err);
+        return err;
+    }
+
+    snprintf(body, n, "%s\n", result.request_id);
+    return SSU_OK;
+}
+
+static ssu_err_t handle_allocate_result(char *save, char *body, size_t n)
+{
+    char *request_id = strtok_r(NULL, " ", &save);
+    ssu_api_allocate_result_info_t result;
+    ssu_err_t err;
+
+    if (request_id == NULL) {
+        snprintf(body, n, "invalid ALLOCATE_RESULT command\n");
+        return SSU_ERR_INVALID;
+    }
+
+    memset(&result, 0, sizeof(result));
+    err = ssu_api_allocate_result_get(request_id, &result);
+    if (err != SSU_OK) {
+        format_operation_error(body, n, "allocate-result-get", err);
+        return err;
+    }
+
+    snprintf(body, n, "%s\n", result.device_path);
+    return SSU_OK;
+}
+
 static ssu_err_t handle_mount(char *save, char *body, size_t n)
 {
     char *aid = strtok_r(NULL, " ", &save);
@@ -434,6 +507,27 @@ static ssu_err_t handle_mount(char *save, char *body, size_t n)
     req.host_id = host;
     snprintf(req.logical_dev, sizeof(req.logical_dev), "%s", dev);
     err = ssu_controller_mount(runtime_plugin(), &req);
+    if (err != SSU_OK) {
+        format_operation_error(body, n, "mount", err);
+        return err;
+    }
+
+    snprintf(body, n, "mounted %s\n", dev);
+    return SSU_OK;
+}
+
+static ssu_err_t handle_mount_dev(char *save, char *body, size_t n)
+{
+    char *dev = strtok_r(NULL, " ", &save);
+    char *host = strtok_r(NULL, " ", &save);
+    ssu_err_t err;
+
+    if (dev == NULL || host == NULL) {
+        snprintf(body, n, "invalid MOUNT_DEV command\n");
+        return SSU_ERR_INVALID;
+    }
+
+    err = ssu_api_mount(dev, host);
     if (err != SSU_OK) {
         format_operation_error(body, n, "mount", err);
         return err;
@@ -480,6 +574,36 @@ static ssu_err_t handle_release(char *save, char *body, size_t n)
     }
 
     snprintf(body, n, "released %s\n", aid);
+    return SSU_OK;
+}
+
+static ssu_err_t handle_list(char *body, size_t n)
+{
+    if (refresh_pool() != 0) {
+        snprintf(body, n, "pool refresh failed\n");
+        return SSU_ERR_INTERNAL;
+    }
+
+    return build_pool_body(body, n);
+}
+
+static ssu_err_t handle_free(char *save, char *body, size_t n)
+{
+    char *dev = strtok_r(NULL, " ", &save);
+    ssu_err_t err;
+
+    if (dev == NULL) {
+        snprintf(body, n, "invalid FREE command\n");
+        return SSU_ERR_INVALID;
+    }
+
+    err = ssu_api_free(dev);
+    if (err != SSU_OK) {
+        format_operation_error(body, n, "free", err);
+        return err;
+    }
+
+    snprintf(body, n, "freed %s\n", dev);
     return SSU_OK;
 }
 
@@ -530,12 +654,22 @@ static void handle_command(int fd, char *request)
 
     if (strcmp(cmd, "ALLOC") == 0) {
         err = handle_alloc(save, body, sizeof(body));
+    } else if (strcmp(cmd, "ALLOCATE") == 0) {
+        err = handle_allocate(save, body, sizeof(body));
+    } else if (strcmp(cmd, "ALLOCATE_RESULT") == 0) {
+        err = handle_allocate_result(save, body, sizeof(body));
     } else if (strcmp(cmd, "MOUNT") == 0) {
         err = handle_mount(save, body, sizeof(body));
+    } else if (strcmp(cmd, "MOUNT_DEV") == 0) {
+        err = handle_mount_dev(save, body, sizeof(body));
     } else if (strcmp(cmd, "UNMOUNT") == 0) {
         err = handle_unmount(save, body, sizeof(body));
     } else if (strcmp(cmd, "RELEASE") == 0) {
         err = handle_release(save, body, sizeof(body));
+    } else if (strcmp(cmd, "FREE") == 0) {
+        err = handle_free(save, body, sizeof(body));
+    } else if (strcmp(cmd, "LIST") == 0) {
+        err = handle_list(body, sizeof(body));
     } else if (strcmp(cmd, "QUERY") == 0) {
         err = handle_query(save, body, sizeof(body));
     } else {

@@ -103,6 +103,20 @@ typedef struct {
     uint64_t phys_sector;
 } ssu_logdev_info_t;
 
+typedef struct {
+    uint64_t size_bytes;
+    const char *tenant_id;
+    uint32_t shard_count;
+    int logical_disk_aggregate;
+    ssu_share_type_t allocation_type;
+    const char *const *host_ids;
+    uint32_t host_count;
+} ssu_api_allocate_req_t;
+
+typedef struct {
+    char request_id[64];
+} ssu_api_allocate_resp_t;
+
 typedef enum {
     SSU_OK = 0,
     SSU_ERR_INVALID = -1,
@@ -116,6 +130,12 @@ typedef enum {
     SSU_ERR_UNSUPPORTED = -9,
     SSU_ERR_INTERNAL = -99,
 } ssu_err_t;
+
+typedef struct {
+    ssu_err_t status;
+    char device_path[64];
+    char error_message[128];
+} ssu_api_allocate_result_info_t;
 
 ssu_err_t ssu_resource_alloc(const ssu_alloc_req_t *req,
                              ssu_alloc_result_t *out,
@@ -132,6 +152,23 @@ ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
                              void *out_array,
                              size_t out_elem_size,
                              uint32_t *inout_count);
+
+ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
+                           ssu_api_allocate_resp_t *out);
+
+ssu_err_t ssu_api_free(const char *device_path);
+
+ssu_err_t ssu_api_list(ssu_resource_info_t *out,
+                       uint32_t *inout_count);
+
+ssu_err_t ssu_api_allocate_result_get(
+    const char *request_id,
+    ssu_api_allocate_result_info_t *out);
+
+ssu_err_t ssu_api_mount(const char *device_path,
+                        const char *host_id);
+
+ssu_err_t ssu_api_unmount(const char *device_path);
 
 #ifdef __cplusplus
 }

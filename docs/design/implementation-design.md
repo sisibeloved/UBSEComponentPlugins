@@ -174,7 +174,7 @@ flowchart TB
 
 依据架构设计 #1 与功能设计 #2，SSU API 是组件对外的统一入口，对外以 **`libubse` SDK（C 库）** 与 **`ubsectl` CLI** 两种形态提供，二者共用同一套语义接口。
 
-> 下表是**逻辑操作**（对使用者暴露的能力面），共 5 类：分配 / 挂载 / 释放 / 解挂载 / 查询。实际代码实现为达成这些能力，会拆分出更多内部细粒度函数（如分配内部进一步区分"选片/创建命名空间/挂载/回滚"等子步骤），实现接口数高于本表。本节只锚定对外稳定契约，内部细分在 §4 各模块实现中体现。
+对集成方优先暴露的是 **6 个逻辑接口**：`ALLOCATE` / `ALLOCATE_RESULT_GET` / `LIST` / `MOUNT` / `UNMOUNT` / `FREE`。它们隐藏内部 `allocate_id`、namespace、ReqShim 映射等细节；兼容层仍保留 `ssu_resource_*` 与 `ubsectl alloc/release/query`，便于调试和老脚本继续工作。
 
 ### 3.1 接口总表
 
@@ -190,6 +190,17 @@ flowchart TB
 
 - **`libubse` SDK**：C ABI 动态库，供 UBS IO、存储业务系统直接链接，程序化调用。
 - **`ubsectl` CLI**：命令行工具，供管理员运维（纳管、分配、挂载、查询、扩缩容触发），内部封装同一组 SDK 接口。
+
+**逻辑接口与 CLI 对照：**
+
+| 逻辑接口 | SDK | CLI | 说明 |
+| ---- | ---- | ---- | ---- |
+| `INTF_SSU_API_ALLOCATE` | `ssu_api_allocate` | `ubsectl allocate` | 输入空间大小、租户 ID、分片数、逻辑盘聚合开关、共享/独占类型、HostId 列表；返回请求 ID。MVP 当前只支持 `shard_count=1` 且开启逻辑盘聚合，否则返回 `SSU_ERR_UNSUPPORTED`。租户和 HostId 是业务透传标签，本组件不做业务授权校验。 |
+| `INTF_SSU_API_ALLOCATE_RESULT_GET` | `ssu_api_allocate_result_get` | `ubsectl allocate-result-get` | 输入请求 ID；成功返回预留逻辑设备路径，如 `/dev/ssu0`；失败返回错误码和错误信息。MVP 分配是同步完成的，所以请求 ID 当前等同底层 `allocate_id`。 |
+| `INTF_SSU_API_LIST` | `ssu_api_list` | `ubsectl list` | 返回当前可用于分配的 SSU 资源列表；函数返回值表达请求成功/失败状态。 |
+| `INTF_SSU_API_MOUNT` | `ssu_api_mount` | `ubsectl mount --dev /dev/ssuN --host HOST` | 输入设备路径与 Host ID；内部反查请求 ID/分配实例，然后建立本机逻辑设备映射。 |
+| `INTF_SSU_API_UNMOUNT` | `ssu_api_unmount` | `ubsectl unmount --dev /dev/ssuN` | 解挂载逻辑设备；保留 SSU 侧 namespace 与数据。 |
+| `INTF_SSU_API_FREE` | `ssu_api_free` | `ubsectl free --dev /dev/ssuN` | 输入设备路径；要求设备已解挂载，然后释放并删除底层 namespace。 |
 
 ### 3.2 RPC 路由链
 
@@ -324,6 +335,21 @@ typedef struct {
     uint64_t phys_sector;
 } ssu_logdev_info_t;
 
+/* —— 逻辑 API：分配请求 —— */
+typedef struct {
+    uint64_t        size_bytes;             // 空间大小
+    const char     *tenant_id;              // 业务透传标签，不做授权校验
+    uint32_t        shard_count;            // 分片数；MVP 仅支持 1
+    int             logical_disk_aggregate; // 是否聚合成逻辑盘；MVP 仅支持开启
+    ssu_share_type_t allocation_type;       // 独占/共享
+    const char *const *host_ids;            // 独占为单 Host，共享为 Host 列表
+    uint32_t        host_count;
+} ssu_api_allocate_req_t;
+
+typedef struct {
+    char request_id[64];                    // 当前等同底层 allocate_id
+} ssu_api_allocate_resp_t;
+
 /* —— 错误码 —— */
 typedef enum {
     SSU_OK              = 0,
@@ -339,7 +365,13 @@ typedef enum {
     SSU_ERR_INTERNAL    = -99,
 } ssu_err_t;
 
-/* —— 5 类逻辑操作 —— */
+typedef struct {
+    ssu_err_t status;                       // SSU_OK 或失败错误码
+    char      device_path[64];              // 成功时的 /dev/ssuN
+    char      error_message[128];           // 失败时的人类可读信息
+} ssu_api_allocate_result_info_t;
+
+/* —— 兼容/调试用 resource 接口 —— */
 ssu_err_t ssu_resource_alloc(const ssu_alloc_req_t  *req,
                              ssu_alloc_result_t     *out,
                              ssu_alloc_extent_t     *out_extents,
@@ -355,6 +387,24 @@ ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
                              void                  *out_array,
                              size_t                 out_elem_size,
                              uint32_t              *inout_count);
+
+/* —— 对集成方优先暴露的逻辑 API —— */
+ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
+                           ssu_api_allocate_resp_t *out);
+
+ssu_err_t ssu_api_free(const char *device_path);
+
+ssu_err_t ssu_api_list(ssu_resource_info_t *out,
+                       uint32_t *inout_count);
+
+ssu_err_t ssu_api_allocate_result_get(
+    const char *request_id,
+    ssu_api_allocate_result_info_t *out);
+
+ssu_err_t ssu_api_mount(const char *device_path,
+                        const char *host_id);
+
+ssu_err_t ssu_api_unmount(const char *device_path);
 
 #ifdef __cplusplus
 }

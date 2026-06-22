@@ -66,6 +66,17 @@ api_extent_buffer = executable(
 
 test('api_extent_buffer', api_extent_buffer)
 
+api_logical = executable(
+  'api_logical',
+  sources: ['api_logical.cpp'],
+  include_directories: inc,
+  dependencies: [
+    ssu_api_dep,
+  ],
+)
+
+test('api_logical', api_logical)
+
 dataplane_mock = executable(
   'dataplane_mock',
   sources: ['dataplane_mock.cpp'],

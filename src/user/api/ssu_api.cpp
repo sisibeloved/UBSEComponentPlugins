@@ -2,8 +2,21 @@
 #include "ssu_controller.h"
 #include "ssu_plugin.h"
 
+#include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+#define SSU_API_MAX_REQUESTS 128U
+
+typedef struct {
+    int active;
+    char request_id[64];
+    char device_path[64];
+} api_request_t;
+
+static api_request_t api_requests[SSU_API_MAX_REQUESTS];
+static uint32_t next_api_device_index;
 
 static int is_empty_string(const char *s)
 {
@@ -29,6 +42,50 @@ static const ssu_plugin_ops_t *default_plugin(void)
     return ssu_plugin_entry();
 }
 
+static void copy_cstr(char *dst, size_t n, const char *src)
+{
+    if (n == 0) {
+        return;
+    }
+
+    if (src == NULL) {
+        dst[0] = '\0';
+        return;
+    }
+
+    snprintf(dst, n, "%s", src);
+}
+
+static const char *ssu_err_message(ssu_err_t err)
+{
+    switch (err) {
+    case SSU_OK:
+        return "";
+    case SSU_ERR_INVALID:
+        return "invalid argument";
+    case SSU_ERR_NO_RESOURCE:
+        return "no usable SSU resource";
+    case SSU_ERR_NOT_FOUND:
+        return "requested SSU object was not found";
+    case SSU_ERR_BUSY:
+        return "resource is still in use";
+    case SSU_ERR_IO:
+        return "device I/O operation failed";
+    case SSU_ERR_KERNEL:
+        return "kernel data path operation failed";
+    case SSU_ERR_NS_EXISTS:
+        return "namespace already exists";
+    case SSU_ERR_BUFFER_TOO_SMALL:
+        return "caller buffer is too small";
+    case SSU_ERR_UNSUPPORTED:
+        return "operation is not supported by this build";
+    case SSU_ERR_INTERNAL:
+        return "internal error";
+    default:
+        return "unknown error";
+    }
+}
+
 static ssu_err_t refresh_default_pool(void)
 {
     const ssu_plugin_ops_t *plugin = default_plugin();
@@ -38,6 +95,214 @@ static ssu_err_t refresh_default_pool(void)
     }
 
     return ssu_controller_refresh_pool(plugin);
+}
+
+static int parse_prefixed_u32(const char *s, const char *prefix,
+                              uint32_t *out)
+{
+    const char *p;
+    uint64_t value = 0;
+    size_t prefix_len;
+
+    if (s == NULL || prefix == NULL || out == NULL) {
+        return 0;
+    }
+
+    prefix_len = strlen(prefix);
+    if (strncmp(s, prefix, prefix_len) != 0) {
+        return 0;
+    }
+
+    p = s + prefix_len;
+    if (*p == '\0') {
+        return 0;
+    }
+
+    while (*p != '\0') {
+        if (*p < '0' || *p > '9') {
+            return 0;
+        }
+        value = (value * 10U) + (uint64_t)(*p - '0');
+        if (value > UINT32_MAX) {
+            return 0;
+        }
+        p++;
+    }
+
+    *out = (uint32_t)value;
+    return 1;
+}
+
+static void default_device_path_for_request(const char *request_id,
+                                            char *out, size_t n)
+{
+    uint32_t index;
+
+    if (parse_prefixed_u32(request_id, "alloc-", &index)) {
+        snprintf(out, n, "/dev/ssu%u", index);
+        if (index >= next_api_device_index) {
+            next_api_device_index = index + 1U;
+        }
+        return;
+    }
+
+    snprintf(out, n, "/dev/ssu%u", next_api_device_index);
+    next_api_device_index++;
+}
+
+static int device_path_to_request_id(const char *device_path,
+                                     char *out, size_t n)
+{
+    uint32_t index;
+
+    if (!parse_prefixed_u32(device_path, "/dev/ssu", &index)) {
+        return 0;
+    }
+
+    snprintf(out, n, "alloc-%u", index);
+    return 1;
+}
+
+static api_request_t *find_request_by_id(const char *request_id)
+{
+    uint32_t i;
+
+    for (i = 0; i < SSU_API_MAX_REQUESTS; i++) {
+        if (api_requests[i].active &&
+            strcmp(api_requests[i].request_id, request_id) == 0) {
+            return &api_requests[i];
+        }
+    }
+
+    return NULL;
+}
+
+static api_request_t *find_request_by_device(const char *device_path)
+{
+    uint32_t i;
+
+    for (i = 0; i < SSU_API_MAX_REQUESTS; i++) {
+        if (api_requests[i].active &&
+            strcmp(api_requests[i].device_path, device_path) == 0) {
+            return &api_requests[i];
+        }
+    }
+
+    return NULL;
+}
+
+static api_request_t *register_request_path(const char *request_id)
+{
+    api_request_t *slot = find_request_by_id(request_id);
+    uint32_t i;
+
+    if (slot != NULL) {
+        return slot;
+    }
+
+    for (i = 0; i < SSU_API_MAX_REQUESTS; i++) {
+        if (!api_requests[i].active) {
+            memset(&api_requests[i], 0, sizeof(api_requests[i]));
+            api_requests[i].active = 1;
+            copy_cstr(api_requests[i].request_id,
+                      sizeof(api_requests[i].request_id), request_id);
+            default_device_path_for_request(request_id,
+                                            api_requests[i].device_path,
+                                            sizeof(api_requests[i].device_path));
+            return &api_requests[i];
+        }
+    }
+
+    return NULL;
+}
+
+static void forget_request_path(const char *request_id)
+{
+    api_request_t *slot = find_request_by_id(request_id);
+
+    if (slot != NULL) {
+        memset(slot, 0, sizeof(*slot));
+    }
+}
+
+static int allocation_exists(const char *request_id)
+{
+    ssu_query_req_t req = {};
+    ssu_allocation_info_t allocations[128];
+    uint32_t count = 128;
+    uint32_t i;
+    ssu_err_t err;
+
+    req.type = SSU_QUERY_ALLOCATION;
+    err = ssu_resource_query(&req, allocations, sizeof(allocations[0]),
+                             &count);
+    if (err != SSU_OK) {
+        return 0;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (strcmp(allocations[i].allocate_id, request_id) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int logdev_request_id(const char *device_path, char *out, size_t n)
+{
+    ssu_query_req_t req = {};
+    ssu_logdev_info_t logdevs[128];
+    uint32_t count = 128;
+    uint32_t i;
+    ssu_err_t err;
+
+    req.type = SSU_QUERY_LOGDEV;
+    err = ssu_resource_query(&req, logdevs, sizeof(logdevs[0]), &count);
+    if (err != SSU_OK) {
+        return 0;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (strcmp(logdevs[i].logical_dev, device_path) == 0) {
+            copy_cstr(out, n, logdevs[i].allocate_id);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static ssu_err_t request_id_from_device_path(const char *device_path,
+                                             char *out, size_t n)
+{
+    api_request_t *slot;
+    char request_id[64];
+
+    if (is_empty_string(device_path) || out == NULL || n == 0) {
+        return SSU_ERR_INVALID;
+    }
+
+    if (logdev_request_id(device_path, out, n)) {
+        return SSU_OK;
+    }
+
+    slot = find_request_by_device(device_path);
+    if (slot != NULL && allocation_exists(slot->request_id)) {
+        copy_cstr(out, n, slot->request_id);
+        return SSU_OK;
+    }
+
+    memset(request_id, 0, sizeof(request_id));
+    if (device_path_to_request_id(device_path, request_id,
+                                  sizeof(request_id)) &&
+        allocation_exists(request_id)) {
+        register_request_path(request_id);
+        copy_cstr(out, n, request_id);
+        return SSU_OK;
+    }
+
+    return SSU_ERR_NOT_FOUND;
 }
 
 ssu_err_t ssu_resource_alloc(const ssu_alloc_req_t *req,
@@ -141,4 +406,164 @@ ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
 
     *inout_count = 0;
     return SSU_OK;
+}
+
+ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
+                           ssu_api_allocate_resp_t *out)
+{
+    ssu_alloc_req_t resource_req = {};
+    ssu_alloc_result_t alloc_result;
+    ssu_alloc_extent_t extent;
+    uint32_t extent_count = 1;
+    ssu_err_t err;
+
+    if (req == NULL || out == NULL || req->size_bytes == 0 ||
+        req->shard_count == 0 || req->host_ids == NULL ||
+        req->host_count == 0) {
+        return SSU_ERR_INVALID;
+    }
+
+    if (req->allocation_type != SSU_SHARE_EXCLUSIVE &&
+        req->allocation_type != SSU_SHARE_SHARED) {
+        return SSU_ERR_INVALID;
+    }
+
+    if (req->allocation_type == SSU_SHARE_EXCLUSIVE &&
+        req->host_count != 1) {
+        return SSU_ERR_INVALID;
+    }
+
+    for (uint32_t i = 0; i < req->host_count; i++) {
+        if (is_empty_string(req->host_ids[i])) {
+            return SSU_ERR_INVALID;
+        }
+    }
+
+    if (req->shard_count != 1 || !req->logical_disk_aggregate) {
+        return SSU_ERR_UNSUPPORTED;
+    }
+
+    resource_req.size_bytes = req->size_bytes;
+    resource_req.reliability = SSU_RELIABILITY_STRIPE;
+    resource_req.share_type = req->allocation_type;
+    resource_req.map_dir = SSU_MAP_DIR_FORWARD;
+    resource_req.tenant = req->tenant_id;
+
+    memset(&alloc_result, 0, sizeof(alloc_result));
+    memset(&extent, 0, sizeof(extent));
+    err = ssu_resource_alloc(&resource_req, &alloc_result, &extent,
+                             &extent_count);
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    memset(out, 0, sizeof(*out));
+    copy_cstr(out->request_id, sizeof(out->request_id),
+              alloc_result.allocate_id);
+    if (register_request_path(out->request_id) == NULL) {
+        ssu_resource_release(out->request_id);
+        memset(out, 0, sizeof(*out));
+        return SSU_ERR_INTERNAL;
+    }
+
+    return SSU_OK;
+}
+
+ssu_err_t ssu_api_free(const char *device_path)
+{
+    char request_id[64];
+    ssu_err_t err;
+
+    memset(request_id, 0, sizeof(request_id));
+    err = request_id_from_device_path(device_path, request_id,
+                                      sizeof(request_id));
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    err = ssu_resource_release(request_id);
+    if (err == SSU_OK) {
+        forget_request_path(request_id);
+    }
+
+    return err;
+}
+
+ssu_err_t ssu_api_list(ssu_resource_info_t *out,
+                       uint32_t *inout_count)
+{
+    ssu_query_req_t req = {};
+
+    req.type = SSU_QUERY_POOL;
+    return ssu_resource_query(&req, out, sizeof(ssu_resource_info_t),
+                              inout_count);
+}
+
+ssu_err_t ssu_api_allocate_result_get(
+    const char *request_id,
+    ssu_api_allocate_result_info_t *out)
+{
+    api_request_t *slot;
+
+    if (is_empty_string(request_id) || out == NULL) {
+        return SSU_ERR_INVALID;
+    }
+
+    memset(out, 0, sizeof(*out));
+    if (!allocation_exists(request_id)) {
+        out->status = SSU_ERR_NOT_FOUND;
+        copy_cstr(out->error_message, sizeof(out->error_message),
+                  ssu_err_message(SSU_ERR_NOT_FOUND));
+        return SSU_ERR_NOT_FOUND;
+    }
+
+    slot = register_request_path(request_id);
+    if (slot == NULL) {
+        out->status = SSU_ERR_INTERNAL;
+        copy_cstr(out->error_message, sizeof(out->error_message),
+                  ssu_err_message(SSU_ERR_INTERNAL));
+        return SSU_ERR_INTERNAL;
+    }
+
+    out->status = SSU_OK;
+    copy_cstr(out->device_path, sizeof(out->device_path), slot->device_path);
+    return SSU_OK;
+}
+
+ssu_err_t ssu_api_mount(const char *device_path,
+                        const char *host_id)
+{
+    ssu_mount_req_t req = {};
+    char request_id[64];
+    ssu_err_t err;
+
+    if (is_empty_string(device_path) || is_empty_string(host_id)) {
+        return SSU_ERR_INVALID;
+    }
+
+    memset(request_id, 0, sizeof(request_id));
+    err = request_id_from_device_path(device_path, request_id,
+                                      sizeof(request_id));
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    req.allocate_id = request_id;
+    req.host_id = host_id;
+    copy_cstr(req.logical_dev, sizeof(req.logical_dev), device_path);
+    err = ssu_resource_mount(&req);
+    if (err == SSU_OK) {
+        register_request_path(request_id);
+    }
+
+    return err;
+}
+
+ssu_err_t ssu_api_unmount(const char *device_path)
+{
+    if (is_empty_string(device_path)) {
+        return SSU_ERR_INVALID;
+    }
+
+    return ssu_resource_unmount(device_path);
 }
