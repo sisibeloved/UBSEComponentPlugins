@@ -19,6 +19,7 @@ mkdir -p "$prefix/mock" "$dev_dir" "$configfs_dir/$subnqn/namespaces"
 cat > "$prefix/mock/ssu_lbc_mock.conf" <<EOF
 dev_dir=$dev_dir
 configfs_dir=$configfs_dir
+log_file=$log_file
 EOF
 
 cat > "$prefix/mock/setup_mock_target.sh" <<EOF
@@ -74,8 +75,7 @@ cleanup() {
 trap cleanup EXIT
 
 (
-    cd "$prefix"
-    "$ssu_mgr" --role=manager --socket "$socket"
+    LBC_PREFIX="$prefix" "$ssu_mgr" --role=manager --socket "$socket"
 ) &
 mgr_pid=$!
 
@@ -112,5 +112,12 @@ test ! -e "$dev_dir/nvme1n1"
 test ! -d "$configfs_dir/$subnqn/namespaces/1"
 
 grep -q 'setup nqn.2025-01.io.ssu:m0 4420' "$log_file"
+grep -q 'config prefix=' "$log_file"
+grep -q 'run cwd=' "$log_file"
 grep -q -- '--nsze 1048576' "$log_file"
 grep -q -- '--nsid 1' "$log_file"
+grep -q 'target ready subnqn=nqn.2025-01.io.ssu:m0 port=4420' "$log_file"
+grep -q 'create_ns success allocate_id=alloc-0 ns_id=1' "$log_file"
+grep -q 'mount success allocate_id=alloc-0 host_id=local logical_dev=/dev/ssu0' "$log_file"
+grep -q 'unmount success logical_dev=/dev/ssu0 allocate_id=alloc-0 host_id=local' "$log_file"
+grep -q 'delete_ns success ssu_id=lbc-mock-ssu0 ns_id=1' "$log_file"

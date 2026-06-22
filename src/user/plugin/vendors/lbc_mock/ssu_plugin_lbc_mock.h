@@ -16,6 +16,7 @@ typedef struct {
     const char *subnqn;
     const char *dev_dir;
     const char *configfs_dir;
+    const char *log_file;
 } ssu_lbc_mock_config_t;
 
 ssu_err_t ssu_lbc_mock_configure(const ssu_lbc_mock_config_t *config);

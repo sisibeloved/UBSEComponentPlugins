@@ -28,8 +28,7 @@ cleanup() {
 trap cleanup EXIT
 
 (
-    cd "$lbc_prefix"
-    "$ssu_mgr" --role=manager --socket "$socket"
+    LBC_PREFIX="$lbc_prefix" "$ssu_mgr" --role=manager --socket "$socket"
 ) &
 mgr_pid=$!
 

@@ -22,4 +22,13 @@ if get_option('vendor') == 'lbc_mock'
     args: [meson.project_build_root()],
     timeout: 20,
   )
+
+  lbc_mock_ubsectl_error_flow = find_program('ubsectl_error_flow.sh')
+
+  test(
+    'lbc_mock_ubsectl_error_flow',
+    lbc_mock_ubsectl_error_flow,
+    args: [meson.project_build_root()],
+    timeout: 20,
+  )
 endif

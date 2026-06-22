@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdarg.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -29,6 +30,7 @@ typedef struct {
     char subnqn[32];
     char dev_dir[256];
     char configfs_dir[256];
+    char log_file[256];
 } lbc_mock_config_t;
 
 typedef struct {
@@ -54,6 +56,7 @@ static lbc_mock_config_t lbc_config = {
     "nqn.2025-01.io.ssu:m0",
     "/dev",
     "/sys/kernel/config/nvmet/subsystems",
+    "/tmp/ubse-lbc-mock.log",
 };
 static lbc_mock_namespace_t namespaces[LBC_MOCK_MAX_NAMESPACES];
 static lbc_mock_mount_t mounts[LBC_MOCK_MAX_MOUNTS];
@@ -64,6 +67,33 @@ static int config_loaded;
 static int is_empty_string(const char *s)
 {
     return s == NULL || s[0] == '\0';
+}
+
+static void lbc_mock_log(const char *fmt, ...)
+{
+    FILE *fp;
+    va_list ap;
+    va_list ap_file;
+
+    va_start(ap, fmt);
+    va_copy(ap_file, ap);
+
+    fputs("lbc_mock: ", stderr);
+    vfprintf(stderr, fmt, ap);
+    fputc('\n', stderr);
+
+    if (!is_empty_string(lbc_config.log_file)) {
+        fp = fopen(lbc_config.log_file, "a");
+        if (fp != NULL) {
+            fputs("lbc_mock: ", fp);
+            vfprintf(fp, fmt, ap_file);
+            fputc('\n', fp);
+            fclose(fp);
+        }
+    }
+
+    va_end(ap_file);
+    va_end(ap);
 }
 
 static void copy_cstr(char *dst, size_t n, const char *src)
@@ -130,6 +160,8 @@ static void apply_config_pair(const char *key, const char *value)
         if (errno == 0 && end != value && *end == '\0' &&
             port > 0 && port <= UINT16_MAX) {
             lbc_config.port = (uint16_t)port;
+        } else {
+            lbc_mock_log("ignore invalid config port=%s", value);
         }
         return;
     }
@@ -137,6 +169,9 @@ static void apply_config_pair(const char *key, const char *value)
     if (strcmp(key, "subnqn") == 0 || strcmp(key, "sub-nqn") == 0) {
         if (strlen(value) <= LBC_MOCK_SUBNQN_MAX) {
             copy_cstr(lbc_config.subnqn, sizeof(lbc_config.subnqn), value);
+        } else {
+            lbc_mock_log("ignore invalid config subnqn=%s length=%zu max=%u",
+                         value, strlen(value), LBC_MOCK_SUBNQN_MAX);
         }
         return;
     }
@@ -150,16 +185,26 @@ static void apply_config_pair(const char *key, const char *value)
         strcmp(key, "configfs-dir") == 0) {
         copy_cstr(lbc_config.configfs_dir, sizeof(lbc_config.configfs_dir),
                   value);
+        return;
     }
+
+    if (strcmp(key, "log_file") == 0 || strcmp(key, "log-file") == 0) {
+        copy_cstr(lbc_config.log_file, sizeof(lbc_config.log_file), value);
+        return;
+    }
+
+    lbc_mock_log("ignore unknown config key=%s", key);
 }
 
 static void load_config_file(const char *path)
 {
     FILE *fp;
     char line[512];
+    unsigned int line_no = 0;
 
     fp = fopen(path, "r");
     if (fp == NULL) {
+        lbc_mock_log("config file not found, using defaults: %s", path);
         return;
     }
 
@@ -169,12 +214,15 @@ static void load_config_file(const char *path)
         char *key;
         char *value;
 
+        line_no++;
         if (*p == '\0' || *p == '#') {
             continue;
         }
 
         eq = strchr(p, '=');
         if (eq == NULL) {
+            lbc_mock_log("ignore malformed config line %u in %s", line_no,
+                         path);
             continue;
         }
 
@@ -185,23 +233,36 @@ static void load_config_file(const char *path)
     }
 
     fclose(fp);
+    lbc_mock_log("config file loaded: %s", path);
 }
 
 static void ensure_config_loaded(void)
 {
     char config_path[512];
+    const char *prefix_env;
 
     if (config_loaded) {
         return;
     }
 
     config_loaded = 1;
+    prefix_env = getenv("LBC_PREFIX");
+    if (!is_empty_string(prefix_env)) {
+        copy_cstr(lbc_config.prefix, sizeof(lbc_config.prefix), prefix_env);
+    }
+
     if (!checked_join(config_path, sizeof(config_path), lbc_config.prefix,
                       "mock/ssu_lbc_mock.conf")) {
+        lbc_mock_log("invalid prefix while loading config: prefix=%s",
+                     lbc_config.prefix);
         return;
     }
 
     load_config_file(config_path);
+    lbc_mock_log("config prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u log_file=%s",
+                 lbc_config.prefix, lbc_config.dev_dir,
+                 lbc_config.configfs_dir, lbc_config.subnqn,
+                 (unsigned int)lbc_config.port, lbc_config.log_file);
 }
 
 static int script_exists(const char *relative_path)
@@ -220,9 +281,27 @@ static ssu_err_t run_command_in_prefix(const char *const argv[])
 {
     pid_t pid;
     int status;
+    char command[1024];
+    size_t used = 0;
+
+    for (int i = 0; argv[i] != NULL; i++) {
+        int rc = snprintf(command + used, sizeof(command) - used,
+                          "%s%s", i == 0 ? "" : " ", argv[i]);
+        if (rc < 0) {
+            break;
+        }
+        if ((size_t)rc >= sizeof(command) - used) {
+            used = sizeof(command) - 1;
+            break;
+        }
+        used += (size_t)rc;
+    }
+    command[used] = '\0';
+    lbc_mock_log("run cwd=%s command=%s", lbc_config.prefix, command);
 
     pid = fork();
     if (pid < 0) {
+        lbc_mock_log("fork failed for command=%s errno=%d", command, errno);
         return SSU_ERR_IO;
     }
 
@@ -240,12 +319,29 @@ static ssu_err_t run_command_in_prefix(const char *const argv[])
             if (errno == EINTR) {
                 continue;
             }
+            lbc_mock_log("waitpid failed for command=%s errno=%d", command,
+                         errno);
             return SSU_ERR_IO;
         }
         break;
     } while (1);
 
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        if (WIFEXITED(status)) {
+            int exit_code = WEXITSTATUS(status);
+            if (exit_code == 126) {
+                lbc_mock_log("command failed exit=126; cannot enter prefix directory or command is not executable: cwd=%s command=%s",
+                             lbc_config.prefix, command);
+            } else if (exit_code == 127) {
+                lbc_mock_log("command failed exit=127; executable not found: command=%s",
+                             command);
+            } else {
+                lbc_mock_log("command failed exit=%d command=%s",
+                             exit_code, command);
+            }
+        } else {
+            lbc_mock_log("command terminated abnormally command=%s", command);
+        }
         return SSU_ERR_IO;
     }
 
@@ -254,10 +350,22 @@ static ssu_err_t run_command_in_prefix(const char *const argv[])
 
 static ssu_err_t ensure_scripts_available(void)
 {
+    char setup_path[512] = "mock/setup_mock_target.sh";
+    char run_path[512] = "mock/run_mock.sh";
+
     ensure_config_loaded();
 
-    if (!script_exists("mock/setup_mock_target.sh") ||
-        !script_exists("mock/run_mock.sh")) {
+    if (!script_exists("mock/setup_mock_target.sh")) {
+        checked_join(setup_path, sizeof(setup_path), lbc_config.prefix,
+                     "mock/setup_mock_target.sh");
+        lbc_mock_log("missing setup script: %s", setup_path);
+        return SSU_ERR_NOT_FOUND;
+    }
+
+    if (!script_exists("mock/run_mock.sh")) {
+        checked_join(run_path, sizeof(run_path), lbc_config.prefix,
+                     "mock/run_mock.sh");
+        lbc_mock_log("missing run script: %s", run_path);
         return SSU_ERR_NOT_FOUND;
     }
 
@@ -288,10 +396,13 @@ static ssu_err_t ensure_target_ready(void)
     snprintf(port, sizeof(port), "%u", (unsigned int)lbc_config.port);
     err = run_command_in_prefix(argv);
     if (err != SSU_OK) {
+        lbc_mock_log("setup target failed subnqn=%s port=%s err=%d",
+                     lbc_config.subnqn, port, err);
         return err;
     }
 
     target_ready = 1;
+    lbc_mock_log("target ready subnqn=%s port=%s", lbc_config.subnqn, port);
     return SSU_OK;
 }
 
@@ -418,11 +529,15 @@ static lbc_mock_mount_t *find_mount(const char *logical_dev)
 ssu_err_t ssu_lbc_mock_configure(const ssu_lbc_mock_config_t *config)
 {
     if (config == NULL || is_empty_string(config->prefix)) {
+        lbc_mock_log("configure failed: prefix is required");
         return SSU_ERR_INVALID;
     }
 
     if (config->subnqn != NULL &&
         strlen(config->subnqn) > LBC_MOCK_SUBNQN_MAX) {
+        lbc_mock_log("configure failed: subnqn too long length=%zu max=%u value=%s",
+                     strlen(config->subnqn), LBC_MOCK_SUBNQN_MAX,
+                     config->subnqn);
         return SSU_ERR_INVALID;
     }
 
@@ -441,12 +556,19 @@ ssu_err_t ssu_lbc_mock_configure(const ssu_lbc_mock_config_t *config)
               is_empty_string(config->configfs_dir) ?
                   "/sys/kernel/config/nvmet/subsystems" :
                   config->configfs_dir);
+    copy_cstr(lbc_config.log_file, sizeof(lbc_config.log_file),
+              is_empty_string(config->log_file) ?
+                  "/tmp/ubse-lbc-mock.log" : config->log_file);
 
     memset(namespaces, 0, sizeof(namespaces));
     memset(mounts, 0, sizeof(mounts));
     next_nsid = 1;
     target_ready = 0;
     config_loaded = 1;
+    lbc_mock_log("configure prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u log_file=%s",
+                 lbc_config.prefix, lbc_config.dev_dir,
+                 lbc_config.configfs_dir, lbc_config.subnqn,
+                 (unsigned int)lbc_config.port, lbc_config.log_file);
     return SSU_OK;
 }
 
@@ -487,10 +609,14 @@ static ssu_err_t lbc_mock_connect(const char *ssu_id, char *out_devname,
     ensure_config_loaded();
 
     if (is_empty_string(ssu_id) || out_devname == NULL || n == 0) {
+        lbc_mock_log("connect failed: invalid arguments ssu_id=%s out=%p n=%zu",
+                     ssu_id == NULL ? "(null)" : ssu_id,
+                     (void *)out_devname, n);
         return SSU_ERR_INVALID;
     }
 
     if (strcmp(ssu_id, "lbc-mock-ssu0") != 0) {
+        lbc_mock_log("connect failed: unknown ssu_id=%s", ssu_id);
         return SSU_ERR_NOT_FOUND;
     }
 
@@ -502,6 +628,7 @@ static ssu_err_t lbc_mock_connect(const char *ssu_id, char *out_devname,
         }
     }
 
+    lbc_mock_log("connect failed: no active namespace for ssu_id=%s", ssu_id);
     return SSU_ERR_NOT_FOUND;
 }
 
@@ -511,10 +638,14 @@ static ssu_err_t lbc_mock_health_check(const char *ssu_id, char *out_state,
     ensure_config_loaded();
 
     if (is_empty_string(ssu_id) || out_state == NULL || n == 0) {
+        lbc_mock_log("health_check failed: invalid arguments ssu_id=%s out=%p n=%zu",
+                     ssu_id == NULL ? "(null)" : ssu_id,
+                     (void *)out_state, n);
         return SSU_ERR_INVALID;
     }
 
     if (strcmp(ssu_id, "lbc-mock-ssu0") != 0) {
+        lbc_mock_log("health_check failed: unknown ssu_id=%s", ssu_id);
         return SSU_ERR_NOT_FOUND;
     }
 
@@ -554,18 +685,33 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
     if (extent_req == NULL || out_ns_id == NULL || n == 0 ||
         out_phys_sector == NULL || is_empty_string(extent_req->allocate_id) ||
         is_empty_string(extent_req->ssu_id)) {
+        lbc_mock_log("create_ns failed: invalid arguments req=%p out_ns_id=%p n=%zu out_phys_sector=%p",
+                     (const void *)extent_req, (void *)out_ns_id, n,
+                     (void *)out_phys_sector);
         return SSU_ERR_INVALID;
     }
 
+    lbc_mock_log("create_ns start allocate_id=%s ssu_id=%s length=%llu policy=%d dev_dir=%s subnqn=%s",
+                 extent_req->allocate_id, extent_req->ssu_id,
+                 (unsigned long long)extent_req->length,
+                 (int)extent_req->policy, lbc_config.dev_dir,
+                 lbc_config.subnqn);
+
     if (strcmp(extent_req->ssu_id, "lbc-mock-ssu0") != 0) {
+        lbc_mock_log("create_ns failed: unknown ssu_id=%s allocate_id=%s",
+                     extent_req->ssu_id, extent_req->allocate_id);
         return SSU_ERR_NOT_FOUND;
     }
 
     if (extent_req->policy != SSU_RELIABILITY_STRIPE) {
+        lbc_mock_log("create_ns failed: unsupported policy=%d allocate_id=%s",
+                     (int)extent_req->policy, extent_req->allocate_id);
         return SSU_ERR_UNSUPPORTED;
     }
 
     if (find_namespace_by_allocate(extent_req->allocate_id) != NULL) {
+        lbc_mock_log("create_ns failed: allocate_id already exists allocate_id=%s",
+                     extent_req->allocate_id);
         return SSU_ERR_NS_EXISTS;
     }
 
@@ -577,25 +723,39 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
     }
 
     if (slot == NULL) {
+        lbc_mock_log("create_ns failed: namespace table full max=%u",
+                     LBC_MOCK_MAX_NAMESPACES);
         return SSU_ERR_NO_RESOURCE;
     }
 
     err = ensure_target_ready();
     if (err != SSU_OK) {
+        lbc_mock_log("create_ns failed: target not ready allocate_id=%s err=%d",
+                     extent_req->allocate_id, err);
         return err;
     }
 
+    if (access(lbc_config.dev_dir, R_OK | X_OK) != 0) {
+        lbc_mock_log("create_ns warning: cannot scan dev_dir before create dev_dir=%s errno=%d",
+                     lbc_config.dev_dir, errno);
+    }
     before = scan_nvme_namespaces();
     snprintf(port, sizeof(port), "%u", (unsigned int)lbc_config.port);
     snprintf(nsze, sizeof(nsze), "%llu",
              (unsigned long long)LBC_MOCK_NSZE);
     err = run_command_in_prefix(argv);
     if (err != SSU_OK) {
+        lbc_mock_log("create_ns failed: create_attach command failed allocate_id=%s err=%d",
+                     extent_req->allocate_id, err);
         return err;
     }
 
     memset(dev_path, 0, sizeof(dev_path));
     if (!choose_created_dev(before, dev_path, sizeof(dev_path))) {
+        std::set<std::string> after = scan_nvme_namespaces();
+        lbc_mock_log("create_attach completed but no new NVMe namespace was found: dev_dir=%s before=%zu after=%zu nsze=%s subnqn=%s",
+                     lbc_config.dev_dir, before.size(), after.size(), nsze,
+                     lbc_config.subnqn);
         return SSU_ERR_NOT_FOUND;
     }
 
@@ -613,6 +773,9 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
     copy_cstr(out_ns_id, n, ns_id);
     *out_phys_sector = 0;
     next_nsid++;
+    lbc_mock_log("create_ns success allocate_id=%s ns_id=%s dev_path=%s length=%llu",
+                 extent_req->allocate_id, ns_id, dev_path,
+                 (unsigned long long)extent_req->length);
     return SSU_OK;
 }
 
@@ -641,11 +804,17 @@ static ssu_err_t lbc_mock_delete_ns(const char *ssu_id, const char *ns_id)
     ensure_config_loaded();
 
     if (is_empty_string(ssu_id) || is_empty_string(ns_id)) {
+        lbc_mock_log("delete_ns failed: invalid arguments ssu_id=%s ns_id=%s",
+                     ssu_id == NULL ? "(null)" : ssu_id,
+                     ns_id == NULL ? "(null)" : ns_id);
         return SSU_ERR_INVALID;
     }
 
+    lbc_mock_log("delete_ns start ssu_id=%s ns_id=%s", ssu_id, ns_id);
     ns = find_namespace(ssu_id, ns_id);
     if (ns == NULL) {
+        lbc_mock_log("delete_ns failed: namespace not found ssu_id=%s ns_id=%s",
+                     ssu_id, ns_id);
         return SSU_ERR_NOT_FOUND;
     }
 
@@ -654,9 +823,13 @@ static ssu_err_t lbc_mock_delete_ns(const char *ssu_id, const char *ns_id)
     argv[6] = ns->dev_path;
     err = run_command_in_prefix(argv);
     if (err != SSU_OK) {
+        lbc_mock_log("delete_ns failed: detach_delete command failed ssu_id=%s ns_id=%s dev_path=%s err=%d",
+                     ssu_id, ns_id, ns->dev_path, err);
         return err;
     }
 
+    lbc_mock_log("delete_ns success ssu_id=%s ns_id=%s dev_path=%s",
+                 ssu_id, ns_id, ns->dev_path);
     memset(ns, 0, sizeof(*ns));
     return SSU_OK;
 }
@@ -669,14 +842,24 @@ static ssu_err_t lbc_mock_mount(const char *allocate_id, const char *host_id,
 
     if (is_empty_string(allocate_id) || is_empty_string(host_id) ||
         is_empty_string(logical_dev)) {
+        lbc_mock_log("mount failed: invalid arguments allocate_id=%s host_id=%s logical_dev=%s",
+                     allocate_id == NULL ? "(null)" : allocate_id,
+                     host_id == NULL ? "(null)" : host_id,
+                     logical_dev == NULL ? "(null)" : logical_dev);
         return SSU_ERR_INVALID;
     }
 
+    lbc_mock_log("mount start allocate_id=%s host_id=%s logical_dev=%s",
+                 allocate_id, host_id, logical_dev);
     if (find_namespace_by_allocate(allocate_id) == NULL) {
+        lbc_mock_log("mount failed: allocation namespace not found allocate_id=%s",
+                     allocate_id);
         return SSU_ERR_NOT_FOUND;
     }
 
     if (find_mount(logical_dev) != NULL) {
+        lbc_mock_log("mount failed: logical device busy logical_dev=%s",
+                     logical_dev);
         return SSU_ERR_BUSY;
     }
 
@@ -688,6 +871,8 @@ static ssu_err_t lbc_mock_mount(const char *allocate_id, const char *host_id,
     }
 
     if (slot == NULL) {
+        lbc_mock_log("mount failed: mount table full max=%u",
+                     LBC_MOCK_MAX_MOUNTS);
         return SSU_ERR_NO_RESOURCE;
     }
 
@@ -696,6 +881,8 @@ static ssu_err_t lbc_mock_mount(const char *allocate_id, const char *host_id,
     copy_cstr(slot->allocate_id, sizeof(slot->allocate_id), allocate_id);
     copy_cstr(slot->host_id, sizeof(slot->host_id), host_id);
     copy_cstr(slot->logical_dev, sizeof(slot->logical_dev), logical_dev);
+    lbc_mock_log("mount success allocate_id=%s host_id=%s logical_dev=%s",
+                 allocate_id, host_id, logical_dev);
     return SSU_OK;
 }
 
@@ -704,14 +891,21 @@ static ssu_err_t lbc_mock_unmount(const char *logical_dev)
     lbc_mock_mount_t *mount;
 
     if (is_empty_string(logical_dev)) {
+        lbc_mock_log("unmount failed: invalid logical_dev=%s",
+                     logical_dev == NULL ? "(null)" : logical_dev);
         return SSU_ERR_INVALID;
     }
 
+    lbc_mock_log("unmount start logical_dev=%s", logical_dev);
     mount = find_mount(logical_dev);
     if (mount == NULL) {
+        lbc_mock_log("unmount failed: logical device not found logical_dev=%s",
+                     logical_dev);
         return SSU_ERR_NOT_FOUND;
     }
 
+    lbc_mock_log("unmount success logical_dev=%s allocate_id=%s host_id=%s",
+                 logical_dev, mount->allocate_id, mount->host_id);
     memset(mount, 0, sizeof(*mount));
     return SSU_OK;
 }

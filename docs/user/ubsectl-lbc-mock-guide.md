@@ -6,7 +6,7 @@
 
 1. 构建一个 `lbc_mock` 版本。
 2. 启动一个常驻的 `ssu-mgr`。
-3. 让 `ubsectl` 通过 `SSU_MGR_SOCKET` 连接这个 `ssu-mgr`。
+3. 让 `ubsectl` 连接这个 `ssu-mgr`。
 4. 后续只用 `ubsectl alloc/mount/query/unmount/release`。
 
 ## 一句话结论
@@ -18,16 +18,71 @@
 ```text
 你的系统 / 脚本
   -> ubsectl
-  -> SSU_MGR_SOCKET
+  -> 默认本地 FIFO
   -> ssu-mgr
   -> LBC mock SSU Plugin
   -> mock/setup_mock_target.sh / mock/run_mock.sh
   -> /dev/nvmeXnY
 ```
 
+## 最快验证路径
+
+只需要准备一个环境变量：`LBC_PREFIX`。
+
+```bash
+export LBC_PREFIX=/path/to/lbc/mock/prefix
+
+meson setup build-lbc -Dvendor=lbc_mock
+meson compile -C build-lbc
+```
+
+第一个终端启动 manager：
+
+```bash
+sudo env LBC_PREFIX="$LBC_PREFIX" \
+    ./build-lbc/src/user/runtime/ssu-mgr --role=manager
+```
+
+这个进程不要退出。
+
+第二个终端只调用 `ubsectl`：
+
+```bash
+sudo ./build-lbc/tools/ubsectl query --type pool
+
+sudo ./build-lbc/tools/ubsectl alloc \
+    --size 512M \
+    --stripe \
+    --share exclusive \
+    --out /tmp/ssu-aid
+
+AID=$(cat /tmp/ssu-aid)
+
+sudo ./build-lbc/tools/ubsectl mount \
+    --aid "$AID" \
+    --host local \
+    --dev /dev/ssu0
+
+sudo ./build-lbc/tools/ubsectl query --type logdev
+
+sudo ./build-lbc/tools/ubsectl unmount --dev /dev/ssu0
+sudo ./build-lbc/tools/ubsectl release --aid "$AID"
+```
+
+默认值如下：
+
+```text
+manager FIFO=/tmp/ubse-ssu-mgr.fifo
+dev_ip=127.0.0.1
+port=4420
+subnqn=nqn.2025-01.io.ssu:m0
+nsze=1048576
+log_file=/tmp/ubse-lbc-mock.log
+```
+
 ## SSU_MGR_SOCKET 是什么
 
-`SSU_MGR_SOCKET` 是 `ubsectl` 用来找到 `ssu-mgr` 的通信入口。
+`SSU_MGR_SOCKET` 是 `ubsectl` 用来找到 `ssu-mgr` 的通信入口。快速验证时通常不用设置它。
 
 现在代码里的实现是 Linux FIFO，也就是命名管道，不是真正的 Unix domain socket。变量名里叫 `SOCKET`，表达的是“manager 的本地通信地址”这个概念。
 
@@ -37,22 +92,29 @@
 - `ubsectl` 是命令行工具，执行完一条命令就退出。
 - 所以 `ubsectl alloc`、`ubsectl mount`、`ubsectl release` 必须发给同一个 `ssu-mgr`，才能共享同一份状态。
 
-启动时用 `--socket` 指定 manager 的入口：
+默认入口是：
+
+```text
+/tmp/ubse-ssu-mgr.fifo
+```
+
+如果你有多个 manager，或者不想用默认路径，可以手动指定：
 
 ```bash
-sudo "$BUILD/src/user/runtime/ssu-mgr" \
+sudo env LBC_PREFIX="$LBC_PREFIX" \
+    ./build-lbc/src/user/runtime/ssu-mgr \
     --role=manager \
     --socket "$SSU_SOCKET"
 ```
 
-调用 `ubsectl` 时用 `SSU_MGR_SOCKET` 指向同一个入口：
+调用 `ubsectl` 时再用 `SSU_MGR_SOCKET` 指向同一个入口：
 
 ```bash
 sudo env SSU_MGR_SOCKET="$SSU_SOCKET" \
-    "$BUILD/tools/ubsectl" query --type pool
+    ./build-lbc/tools/ubsectl query --type pool
 ```
 
-如果不设置 `SSU_MGR_SOCKET`，`ubsectl` 就不会把命令发给常驻 `ssu-mgr`，完整生命周期里的状态会断开。
+如果不设置 `SSU_MGR_SOCKET`，`ubsectl` 会自动尝试默认入口 `/tmp/ubse-ssu-mgr.fifo`。如果默认入口也不存在，才会退回直接调用模式。
 
 ## 准备 LBC mock 目录
 
@@ -119,35 +181,28 @@ build-lbc/tools/ubsectl
 真实 LBC mock 会操作 configfs 和 `/dev/nvme*`，通常需要 root 权限。建议先用一个终端专门跑 `ssu-mgr`：
 
 ```bash
-export BUILD=/opt/ZCode/UBSEComponentPlugins/build-lbc
 export LBC_PREFIX=/path/to/lbc/mock/prefix
-export SSU_SOCKET=/tmp/ubse-ssu-lbc-mock.fifo
 
-cd "$LBC_PREFIX"
-sudo "$BUILD/src/user/runtime/ssu-mgr" \
-    --role=manager \
-    --socket "$SSU_SOCKET"
+sudo env LBC_PREFIX="$LBC_PREFIX" \
+    ./build-lbc/src/user/runtime/ssu-mgr --role=manager
 ```
 
 这个进程不要退出。它就是 `ubsectl` 后面的常驻控制面。
 
 如果启动失败，并提示类似 `pool refresh failed`，优先检查：
 
-- 当前目录是不是 `$LBC_PREFIX`。
+- `LBC_PREFIX` 是否指向 LBC mock 前缀目录。
 - `$LBC_PREFIX/mock/setup_mock_target.sh` 是否存在。
 - `$LBC_PREFIX/mock/run_mock.sh` 是否存在。
 - 脚本是否能被 `bash` 执行。
+- `/tmp/ubse-lbc-mock.log` 里的最后几行。
 
 ## 用 ubsectl 操作
 
 另开一个终端。下面所有命令都只调用 `ubsectl`，不直接碰 LBC mock 脚本：
 
 ```bash
-export BUILD=/opt/ZCode/UBSEComponentPlugins/build-lbc
-export SSU_SOCKET=/tmp/ubse-ssu-lbc-mock.fifo
-
-sudo env SSU_MGR_SOCKET="$SSU_SOCKET" \
-    "$BUILD/tools/ubsectl" query --type pool
+sudo ./build-lbc/tools/ubsectl query --type pool
 ```
 
 看到类似输出就说明 `ubsectl -> ssu-mgr -> LBC mock plugin` 这条控制面通了：
@@ -160,8 +215,7 @@ lbc-mock-ssu0 lbc-mock-host0 ONLINE 0/536870912
 申请 512 MiB 空间：
 
 ```bash
-sudo env SSU_MGR_SOCKET="$SSU_SOCKET" \
-    "$BUILD/tools/ubsectl" alloc \
+sudo ./build-lbc/tools/ubsectl alloc \
     --size 512M \
     --stripe \
     --share exclusive \
@@ -173,8 +227,7 @@ AID=$(cat /tmp/ssu-aid)
 挂载成逻辑设备名：
 
 ```bash
-sudo env SSU_MGR_SOCKET="$SSU_SOCKET" \
-    "$BUILD/tools/ubsectl" mount \
+sudo ./build-lbc/tools/ubsectl mount \
     --aid "$AID" \
     --host local \
     --dev /dev/ssu0
@@ -183,8 +236,7 @@ sudo env SSU_MGR_SOCKET="$SSU_SOCKET" \
 查看逻辑设备到真实 NVMe namespace 的映射：
 
 ```bash
-sudo env SSU_MGR_SOCKET="$SSU_SOCKET" \
-    "$BUILD/tools/ubsectl" query --type logdev
+sudo ./build-lbc/tools/ubsectl query --type logdev
 ```
 
 输出类似：
@@ -214,11 +266,9 @@ ls /sys/kernel/config/nvmet/subsystems/nqn.2025-01.io.ssu:m0/namespaces/
 解挂载并释放：
 
 ```bash
-sudo env SSU_MGR_SOCKET="$SSU_SOCKET" \
-    "$BUILD/tools/ubsectl" unmount --dev /dev/ssu0
+sudo ./build-lbc/tools/ubsectl unmount --dev /dev/ssu0
 
-sudo env SSU_MGR_SOCKET="$SSU_SOCKET" \
-    "$BUILD/tools/ubsectl" release --aid "$AID"
+sudo ./build-lbc/tools/ubsectl release --aid "$AID"
 ```
 
 释放后再确认：
@@ -230,6 +280,24 @@ ls /sys/kernel/config/nvmet/subsystems/nqn.2025-01.io.ssu:m0/namespaces/
 
 期望刚才创建的 `/dev/nvmeXnY` 和 namespace `1` 已经消失。
 
+## 失败时怎么看
+
+`ubsectl` 现在会返回错误名和提示，不只返回数字。例如：
+
+```text
+alloc failed: SSU_ERR_NOT_FOUND (-3)
+plugin: lbc_mock
+hint: lbc_mock create/attach finished, but no new /dev/nvmeXnY namespace was found. Check LBC_PREFIX, mock/run_mock.sh, ls /dev/nvme*n*, and /tmp/ubse-lbc-mock.log.
+```
+
+LBC mock 插件的默认日志文件是：
+
+```bash
+sudo tail -n 50 /tmp/ubse-lbc-mock.log
+```
+
+同时也看启动 `ssu-mgr` 的那个终端。插件会把脚本执行命令、前缀目录、dev 目录、脚本退出码、找不到 NVMe namespace 等信息写到那里。
+
 ## 可选配置文件
 
 默认情况下不需要配置文件。SSU Plugin 会使用这些默认值：
@@ -240,6 +308,7 @@ port=4420
 subnqn=nqn.2025-01.io.ssu:m0
 dev_dir=/dev
 configfs_dir=/sys/kernel/config/nvmet/subsystems
+log_file=/tmp/ubse-lbc-mock.log
 ```
 
 如果确实需要改，比如测试时想把 `/dev` 和 configfs 指到临时目录，可以在 `$LBC_PREFIX/mock/ssu_lbc_mock.conf` 写：
@@ -250,6 +319,7 @@ port=4420
 subnqn=nqn.2025-01.io.ssu:m0
 dev_dir=/dev
 configfs_dir=/sys/kernel/config/nvmet/subsystems
+log_file=/tmp/ubse-lbc-mock.log
 ```
 
 这份配置只属于 LBC mock SSU Plugin，不是整个 SSU Manager 的全局配置。
@@ -296,8 +366,7 @@ sudo bash mock/run_mock.sh ./sample_detach_delete ...
 先查这个：
 
 ```bash
-sudo env SSU_MGR_SOCKET="$SSU_SOCKET" \
-    "$BUILD/tools/ubsectl" query --type logdev
+sudo ./build-lbc/tools/ubsectl query --type logdev
 ```
 
 找到真实设备，比如 `/dev/nvme1n1`，再查：

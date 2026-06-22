@@ -241,6 +241,7 @@ static int run_plugin_flow(const char *prefix, const char *dev_dir,
     config.subnqn = "nqn.2025-01.io.ssu:m0";
     config.dev_dir = dev_dir;
     config.configfs_dir = configfs_dir;
+    config.log_file = log_path;
     if (expect_err("configure", ssu_lbc_mock_configure(&config),
                    SSU_OK) != 0) {
         return 1;

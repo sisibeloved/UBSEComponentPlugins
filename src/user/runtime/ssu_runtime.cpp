@@ -18,6 +18,7 @@
 #endif
 
 #define RUNTIME_BODY_SIZE 8192U
+#define DEFAULT_MANAGER_SOCKET "/tmp/ubse-ssu-mgr.fifo"
 
 typedef struct {
     const char *role;
@@ -27,6 +28,19 @@ typedef struct {
 } runtime_options_t;
 
 static volatile sig_atomic_t stop_requested;
+
+static const ssu_plugin_ops_t *runtime_plugin(void);
+
+static const char *configured_socket_path(void)
+{
+    const char *path = getenv("SSU_MGR_SOCKET");
+
+    if (path != NULL && path[0] != '\0') {
+        return path;
+    }
+
+    return DEFAULT_MANAGER_SOCKET;
+}
 
 static void handle_signal(int signum)
 {
@@ -107,6 +121,85 @@ static int parse_args(int argc, char **argv, runtime_options_t *opts)
     return opts->role != NULL && opts->role[0] != '\0';
 }
 
+static const char *ssu_err_name(ssu_err_t err)
+{
+    switch (err) {
+    case SSU_OK:
+        return "SSU_OK";
+    case SSU_ERR_INVALID:
+        return "SSU_ERR_INVALID";
+    case SSU_ERR_NO_RESOURCE:
+        return "SSU_ERR_NO_RESOURCE";
+    case SSU_ERR_NOT_FOUND:
+        return "SSU_ERR_NOT_FOUND";
+    case SSU_ERR_BUSY:
+        return "SSU_ERR_BUSY";
+    case SSU_ERR_IO:
+        return "SSU_ERR_IO";
+    case SSU_ERR_KERNEL:
+        return "SSU_ERR_KERNEL";
+    case SSU_ERR_NS_EXISTS:
+        return "SSU_ERR_NS_EXISTS";
+    case SSU_ERR_BUFFER_TOO_SMALL:
+        return "SSU_ERR_BUFFER_TOO_SMALL";
+    case SSU_ERR_UNSUPPORTED:
+        return "SSU_ERR_UNSUPPORTED";
+    case SSU_ERR_INTERNAL:
+        return "SSU_ERR_INTERNAL";
+    default:
+        return "SSU_ERR_UNKNOWN";
+    }
+}
+
+static const char *operation_error_hint(const char *plugin_name,
+                                        const char *operation,
+                                        ssu_err_t err)
+{
+    if (plugin_name != NULL && strcmp(plugin_name, "lbc_mock") == 0) {
+        if (strcmp(operation, "alloc") == 0 &&
+            err == SSU_ERR_NOT_FOUND) {
+            return "lbc_mock create/attach finished, but no new /dev/nvmeXnY namespace was found. Check LBC_PREFIX, mock/run_mock.sh, ls /dev/nvme*n*, and /tmp/ubse-lbc-mock.log.";
+        }
+
+        if (strcmp(operation, "alloc") == 0 &&
+            err == SSU_ERR_IO) {
+            return "lbc_mock create/attach command failed. Check ssu-mgr stderr and /tmp/ubse-lbc-mock.log for the exact script and exit status.";
+        }
+
+        if (err == SSU_ERR_NOT_FOUND) {
+            return "lbc_mock did not find the requested SSU, allocation, namespace, or logical device. Check query output and /tmp/ubse-lbc-mock.log.";
+        }
+    }
+
+    if (err == SSU_ERR_NO_RESOURCE) {
+        return "No usable SSU resource is currently available. Run query --type pool and check whether discovery succeeded.";
+    }
+
+    if (err == SSU_ERR_BUSY) {
+        return "The resource is still in use. Unmount it before releasing or reuse another logical device path.";
+    }
+
+    return NULL;
+}
+
+static void format_operation_error(char *body, size_t n,
+                                   const char *operation, ssu_err_t err)
+{
+    const ssu_plugin_ops_t *plugin = runtime_plugin();
+    const char *plugin_name = plugin != NULL && plugin->name != NULL ?
+                                  plugin->name() : "unknown";
+    const char *hint = operation_error_hint(plugin_name, operation, err);
+
+    if (hint == NULL) {
+        snprintf(body, n, "%s failed: %s (%d)\nplugin: %s\n",
+                 operation, ssu_err_name(err), err, plugin_name);
+        return;
+    }
+
+    snprintf(body, n, "%s failed: %s (%d)\nplugin: %s\nhint: %s\n",
+             operation, ssu_err_name(err), err, plugin_name, hint);
+}
+
 static const ssu_plugin_ops_t *runtime_plugin(void)
 {
     return ssu_plugin_entry();
@@ -124,7 +217,8 @@ static int refresh_pool(void)
 
     err = ssu_controller_refresh_pool(plugin);
     if (err != SSU_OK) {
-        fprintf(stderr, "pool refresh failed: %d\n", err);
+        fprintf(stderr, "pool refresh failed: %s (%d)\n",
+                ssu_err_name(err), err);
         return 1;
     }
 
@@ -242,7 +336,8 @@ static int print_pool(void)
     memset(body, 0, sizeof(body));
     err = build_pool_body(body, sizeof(body));
     if (err != SSU_OK) {
-        fprintf(stderr, "pool query failed: %d\n", err);
+        fprintf(stderr, "pool query failed: %s (%d)\n",
+                ssu_err_name(err), err);
         return 1;
     }
 
@@ -313,7 +408,7 @@ static ssu_err_t handle_alloc(char *save, char *body, size_t n)
     err = ssu_controller_alloc(runtime_plugin(), &req, &result, extents,
                                &extent_count);
     if (err != SSU_OK) {
-        snprintf(body, n, "alloc failed: %d\n", err);
+        format_operation_error(body, n, "alloc", err);
         return err;
     }
 
@@ -340,7 +435,7 @@ static ssu_err_t handle_mount(char *save, char *body, size_t n)
     snprintf(req.logical_dev, sizeof(req.logical_dev), "%s", dev);
     err = ssu_controller_mount(runtime_plugin(), &req);
     if (err != SSU_OK) {
-        snprintf(body, n, "mount failed: %d\n", err);
+        format_operation_error(body, n, "mount", err);
         return err;
     }
 
@@ -360,7 +455,7 @@ static ssu_err_t handle_unmount(char *save, char *body, size_t n)
 
     err = ssu_controller_unmount(runtime_plugin(), dev);
     if (err != SSU_OK) {
-        snprintf(body, n, "unmount failed: %d\n", err);
+        format_operation_error(body, n, "unmount", err);
         return err;
     }
 
@@ -380,7 +475,7 @@ static ssu_err_t handle_release(char *save, char *body, size_t n)
 
     err = ssu_controller_release(runtime_plugin(), aid);
     if (err != SSU_OK) {
-        snprintf(body, n, "release failed: %d\n", err);
+        format_operation_error(body, n, "release", err);
         return err;
     }
 
@@ -592,7 +687,13 @@ int main(int argc, char **argv)
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
 
+    if (opts.socket_path == NULL && !opts.once &&
+        strcmp(opts.role, "manager") == 0) {
+        opts.socket_path = configured_socket_path();
+    }
+
     if (opts.socket_path != NULL) {
+        printf("manager socket=%s\n", opts.socket_path);
         return run_fifo_server(&opts);
     }
 

@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #define RESPONSE_SIZE 8192U
+#define DEFAULT_MANAGER_SOCKET "/tmp/ubse-ssu-mgr.fifo"
 
 static void usage(void)
 {
@@ -31,8 +32,53 @@ static int is_empty_string(const char *s)
 static const char *manager_socket_path(void)
 {
     const char *path = getenv("SSU_MGR_SOCKET");
+    struct stat st;
 
-    return is_empty_string(path) ? NULL : path;
+    if (!is_empty_string(path)) {
+        return path;
+    }
+
+    if (stat(DEFAULT_MANAGER_SOCKET, &st) == 0 && S_ISFIFO(st.st_mode)) {
+        return DEFAULT_MANAGER_SOCKET;
+    }
+
+    return NULL;
+}
+
+static const char *ssu_err_name(ssu_err_t err)
+{
+    switch (err) {
+    case SSU_OK:
+        return "SSU_OK";
+    case SSU_ERR_INVALID:
+        return "SSU_ERR_INVALID";
+    case SSU_ERR_NO_RESOURCE:
+        return "SSU_ERR_NO_RESOURCE";
+    case SSU_ERR_NOT_FOUND:
+        return "SSU_ERR_NOT_FOUND";
+    case SSU_ERR_BUSY:
+        return "SSU_ERR_BUSY";
+    case SSU_ERR_IO:
+        return "SSU_ERR_IO";
+    case SSU_ERR_KERNEL:
+        return "SSU_ERR_KERNEL";
+    case SSU_ERR_NS_EXISTS:
+        return "SSU_ERR_NS_EXISTS";
+    case SSU_ERR_BUFFER_TOO_SMALL:
+        return "SSU_ERR_BUFFER_TOO_SMALL";
+    case SSU_ERR_UNSUPPORTED:
+        return "SSU_ERR_UNSUPPORTED";
+    case SSU_ERR_INTERNAL:
+        return "SSU_ERR_INTERNAL";
+    default:
+        return "SSU_ERR_UNKNOWN";
+    }
+}
+
+static void print_operation_error(const char *operation, ssu_err_t err)
+{
+    fprintf(stderr, "%s failed: %s (%d)\n", operation,
+            ssu_err_name(err), err);
 }
 
 static int parse_size(const char *s, uint64_t *out)
@@ -292,7 +338,7 @@ static int refresh_mock_pool(void)
 
     err = ssu_controller_refresh_pool(plugin);
     if (err != SSU_OK) {
-        fprintf(stderr, "pool refresh failed: %d\n", err);
+        print_operation_error("pool refresh", err);
         return 1;
     }
 
@@ -312,7 +358,7 @@ static int print_pool(void)
                              &count);
 
     if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
-        fprintf(stderr, "query failed: %d\n", err);
+        print_operation_error("query", err);
         return 1;
     }
 
@@ -330,7 +376,7 @@ static int print_pool(void)
     err = ssu_resource_query(&req, resources, sizeof(*resources), &count);
     if (err != SSU_OK) {
         free(resources);
-        fprintf(stderr, "query failed: %d\n", err);
+        print_operation_error("query", err);
         return 1;
     }
 
@@ -361,7 +407,7 @@ static int print_allocations(void)
                              &count);
 
     if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
-        fprintf(stderr, "query failed: %d\n", err);
+        print_operation_error("query", err);
         return 1;
     }
 
@@ -380,7 +426,7 @@ static int print_allocations(void)
     err = ssu_resource_query(&req, allocations, sizeof(*allocations), &count);
     if (err != SSU_OK) {
         free(allocations);
-        fprintf(stderr, "query failed: %d\n", err);
+        print_operation_error("query", err);
         return 1;
     }
 
@@ -409,7 +455,7 @@ static int print_logdevs(void)
     err = ssu_resource_query(&req, NULL, sizeof(ssu_logdev_info_t), &count);
 
     if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
-        fprintf(stderr, "query failed: %d\n", err);
+        print_operation_error("query", err);
         return 1;
     }
 
@@ -427,7 +473,7 @@ static int print_logdevs(void)
     err = ssu_resource_query(&req, logdevs, sizeof(*logdevs), &count);
     if (err != SSU_OK) {
         free(logdevs);
-        fprintf(stderr, "query failed: %d\n", err);
+        print_operation_error("query", err);
         return 1;
     }
 
@@ -593,7 +639,7 @@ static int cmd_alloc(int argc, char **argv)
     memset(extents, 0, sizeof(extents));
     err = ssu_resource_alloc(&req, &out, extents, &extent_count);
     if (err != SSU_OK) {
-        fprintf(stderr, "alloc failed: %d\n", err);
+        print_operation_error("alloc", err);
         return 1;
     }
 
@@ -643,7 +689,7 @@ static int cmd_mount(int argc, char **argv)
 
     err = ssu_resource_mount(&req);
     if (err != SSU_OK) {
-        fprintf(stderr, "mount failed: %d\n", err);
+        print_operation_error("mount", err);
         return 1;
     }
 
@@ -687,7 +733,7 @@ static int cmd_unmount(int argc, char **argv)
 
     err = ssu_resource_unmount(logical_dev);
     if (err != SSU_OK) {
-        fprintf(stderr, "unmount failed: %d\n", err);
+        print_operation_error("unmount", err);
         return 1;
     }
 
@@ -731,7 +777,7 @@ static int cmd_release(int argc, char **argv)
 
     err = ssu_resource_release(allocate_id);
     if (err != SSU_OK) {
-        fprintf(stderr, "release failed: %d\n", err);
+        print_operation_error("release", err);
         return 1;
     }
 

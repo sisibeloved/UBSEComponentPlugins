@@ -222,7 +222,7 @@ ubsectl release --aid AID
 ubsectl query   --type pool|allocation|logdev
 ```
 
-控制面 RPC 走 Unix socket，路径由环境变量 `SSU_MGR_SOCKET` 指定（默认本地）。
+控制面 RPC 当前走本地 FIFO，默认路径 `/tmp/ubse-ssu-mgr.fifo`；需要多实例或自定义路径时，用环境变量 `SSU_MGR_SOCKET` 覆盖。
 
 ---
 
@@ -236,7 +236,7 @@ ubsectl query   --type pool|allocation|logdev
 
 业务方所在节点的底层已由平台运维就位，业务方**无需关心**，只需知道两件事：
 
-- 本组件已在节点上运行（由 `ubs-engine` daemon 托管，或独立 `ssu-agent`），提供控制面服务，监听 Unix socket（路径经 `SSU_MGR_SOCKET` 指定）。
+- 本组件已在节点上运行（由 `ubs-engine` daemon 托管，或独立 `ssu-agent`），提供控制面服务，监听本地 FIFO（默认 `/tmp/ubse-ssu-mgr.fifo`，可经 `SSU_MGR_SOCKET` 覆盖）。
 - 内核侧 `ssu_reqshim.ko` 已加载（`/dev/ssu-ctrl` 在），业务方挂载成功后会出现 `/dev/ssuN` 逻辑块设备。
 
 ### 步骤 1：链接 SDK / 准备 CLI
