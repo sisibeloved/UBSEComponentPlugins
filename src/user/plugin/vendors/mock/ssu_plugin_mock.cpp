@@ -436,10 +436,6 @@ static ssu_err_t mock_create_ns(const ssu_extent_create_req_t *extent_req,
         return SSU_ERR_UNSUPPORTED;
     }
 
-    if (find_namespace_by_allocate(extent_req->allocate_id) != NULL) {
-        return SSU_ERR_NS_EXISTS;
-    }
-
     for (i = 0; i < MOCK_MAX_NAMESPACES; i++) {
         if (!namespaces[i].active) {
             slot = &namespaces[i];

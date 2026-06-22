@@ -9,7 +9,7 @@ rm -rf "$backend_dir"
 mkdir -p "$backend_dir"
 trap 'rm -rf "$backend_dir"' EXIT
 
-SSU_MOCK_SSU_COUNT=1 SSU_MOCK_BACKEND_DIR="$backend_dir" \
+SSU_MOCK_SSU_COUNT=2 SSU_MOCK_BACKEND_DIR="$backend_dir" \
     "$ssu_smoke" \
         --alloc --size 65536 --stripe \
         --mount --dev /dev/ssu0 \
@@ -17,3 +17,4 @@ SSU_MOCK_SSU_COUNT=1 SSU_MOCK_BACKEND_DIR="$backend_dir" \
         --unmount --release
 
 test -s "$backend_dir/mock-ssu0.img"
+test -s "$backend_dir/mock-ssu1.img"

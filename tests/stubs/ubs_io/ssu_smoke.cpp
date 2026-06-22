@@ -120,18 +120,45 @@ static int manager_request(const char *command, char *response, size_t n)
     return 1;
 }
 
-static int find_logdev_manager(const char *logical_dev, ssu_logdev_info_t *out)
+static int compare_logdev_offset(const void *a, const void *b)
+{
+    const ssu_logdev_info_t *left = (const ssu_logdev_info_t *)a;
+    const ssu_logdev_info_t *right = (const ssu_logdev_info_t *)b;
+
+    if (left->logical_offset < right->logical_offset) {
+        return -1;
+    }
+
+    if (left->logical_offset > right->logical_offset) {
+        return 1;
+    }
+
+    return 0;
+}
+
+static int collect_logdev_manager(const char *logical_dev,
+                                  ssu_logdev_info_t **out,
+                                  uint32_t *out_count)
 {
     char response[RESPONSE_SIZE];
+    ssu_logdev_info_t *matches;
     char *line;
     char *save = NULL;
+    uint32_t count = 0;
 
-    if (!manager_request("QUERY logdev", response, sizeof(response))) {
+    if (logical_dev == NULL || out == NULL || out_count == NULL ||
+        !manager_request("QUERY logdev", response, sizeof(response))) {
         return 0;
     }
 
     if (strncmp(response, "OK\n", 3) != 0) {
         fputs(response, stderr);
+        return 0;
+    }
+
+    matches = (ssu_logdev_info_t *)calloc(128, sizeof(*matches));
+    if (matches == NULL) {
+        fputs("out of memory\n", stderr);
         return 0;
     }
 
@@ -159,21 +186,40 @@ static int find_logdev_manager(const char *logical_dev, ssu_logdev_info_t *out)
             candidate.logical_offset = (uint64_t)logical_offset;
             candidate.length = (uint64_t)length;
             candidate.phys_sector = (uint64_t)phys_sector;
-            *out = candidate;
-            return 1;
+            if (count >= 128) {
+                free(matches);
+                fputs("too many logdev mappings\n", stderr);
+                return 0;
+            }
+            matches[count++] = candidate;
         }
     }
 
-    return 0;
+    if (count == 0) {
+        free(matches);
+        return 0;
+    }
+
+    qsort(matches, count, sizeof(*matches), compare_logdev_offset);
+    *out = matches;
+    *out_count = count;
+    return 1;
 }
 
-static int find_logdev_sdk(const char *logical_dev, ssu_logdev_info_t *out)
+static int collect_logdev_sdk(const char *logical_dev, ssu_logdev_info_t **out,
+                              uint32_t *out_count)
 {
     ssu_query_req_t req = {};
     ssu_logdev_info_t *logdevs;
+    ssu_logdev_info_t *matches;
     uint32_t count = 0;
+    uint32_t matched = 0;
     uint32_t i;
     ssu_err_t err;
+
+    if (logical_dev == NULL || out == NULL || out_count == NULL) {
+        return 0;
+    }
 
     req.type = SSU_QUERY_LOGDEV;
     req.logical_dev = logical_dev;
@@ -200,16 +246,29 @@ static int find_logdev_sdk(const char *logical_dev, ssu_logdev_info_t *out)
         return 0;
     }
 
+    matches = (ssu_logdev_info_t *)calloc(count, sizeof(*matches));
+    if (matches == NULL) {
+        fputs("out of memory\n", stderr);
+        free(logdevs);
+        return 0;
+    }
+
     for (i = 0; i < count; i++) {
         if (strcmp(logdevs[i].logical_dev, logical_dev) == 0) {
-            *out = logdevs[i];
-            free(logdevs);
-            return 1;
+            matches[matched++] = logdevs[i];
         }
     }
 
     free(logdevs);
-    return 0;
+    if (matched == 0) {
+        free(matches);
+        return 0;
+    }
+
+    qsort(matches, matched, sizeof(*matches), compare_logdev_offset);
+    *out = matches;
+    *out_count = matched;
+    return 1;
 }
 
 static void fill_pattern(unsigned char *buf, size_t n)
@@ -221,14 +280,104 @@ static void fill_pattern(unsigned char *buf, size_t n)
     }
 }
 
-static int run_pattern_io(const ssu_logdev_info_t *logdev, uint64_t bytes,
+static const ssu_logdev_info_t *find_mapping_for_offset(
+    const ssu_logdev_info_t *logdevs, uint32_t logdev_count,
+    uint64_t logical_offset)
+{
+    uint32_t i;
+
+    for (i = 0; i < logdev_count; i++) {
+        uint64_t end = logdevs[i].logical_offset + logdevs[i].length;
+
+        if (logical_offset >= logdevs[i].logical_offset &&
+            logical_offset < end) {
+            return &logdevs[i];
+        }
+    }
+
+    return NULL;
+}
+
+static int write_pattern_segments(const ssu_logdev_info_t *logdevs,
+                                  uint32_t logdev_count,
+                                  const unsigned char *pattern,
+                                  uint64_t bytes)
+{
+    uint64_t cursor = 0;
+
+    while (cursor < bytes) {
+        const ssu_logdev_info_t *entry =
+            find_mapping_for_offset(logdevs, logdev_count, cursor);
+        uint64_t entry_end;
+        uint64_t chunk;
+
+        if (entry == NULL) {
+            fputs("missing logdev mapping for write\n", stderr);
+            return 1;
+        }
+
+        entry_end = entry->logical_offset + entry->length;
+        chunk = bytes - cursor;
+        if (chunk > entry_end - cursor) {
+            chunk = entry_end - cursor;
+        }
+
+        if (ssu_dataplane_write(entry, cursor, pattern + cursor,
+                                (size_t)chunk) != SSU_OK) {
+            fputs("pattern write failed\n", stderr);
+            return 1;
+        }
+        cursor += chunk;
+    }
+
+    return 0;
+}
+
+static int read_pattern_segments(const ssu_logdev_info_t *logdevs,
+                                 uint32_t logdev_count,
+                                 unsigned char *readback,
+                                 uint64_t bytes)
+{
+    uint64_t cursor = 0;
+
+    while (cursor < bytes) {
+        const ssu_logdev_info_t *entry =
+            find_mapping_for_offset(logdevs, logdev_count, cursor);
+        uint64_t entry_end;
+        uint64_t chunk;
+
+        if (entry == NULL) {
+            fputs("missing logdev mapping for read\n", stderr);
+            return 1;
+        }
+
+        entry_end = entry->logical_offset + entry->length;
+        chunk = bytes - cursor;
+        if (chunk > entry_end - cursor) {
+            chunk = entry_end - cursor;
+        }
+
+        if (ssu_dataplane_read(entry, cursor, readback + cursor,
+                               (size_t)chunk) != SSU_OK) {
+            fputs("pattern read failed\n", stderr);
+            return 1;
+        }
+        cursor += chunk;
+    }
+
+    return 0;
+}
+
+static int run_pattern_io(const ssu_logdev_info_t *logdevs,
+                          uint32_t logdev_count, uint64_t bytes,
                           smoke_io_mode_t mode)
 {
     unsigned char *pattern;
     unsigned char *readback = NULL;
     int rc = 1;
 
-    if (bytes == 0 || bytes > (1ULL << 20) || bytes > logdev->length) {
+    if (logdevs == NULL || logdev_count == 0 ||
+        bytes == 0 || bytes > (1ULL << 20)) {
         fprintf(stderr, "invalid smoke io length\n");
         return 1;
     }
@@ -246,16 +395,14 @@ static int run_pattern_io(const ssu_logdev_info_t *logdev, uint64_t bytes,
     fill_pattern(pattern, (size_t)bytes);
 
     if (mode != SMOKE_IO_READ_ONLY &&
-        ssu_dataplane_write(logdev, 0, pattern, (size_t)bytes) != SSU_OK) {
-        fputs("pattern write failed\n", stderr);
+        write_pattern_segments(logdevs, logdev_count, pattern, bytes) != 0) {
         goto out;
     }
 
     if (mode != SMOKE_IO_WRITE_ONLY) {
         memset(readback, 0, (size_t)bytes);
-        if (ssu_dataplane_read(logdev, 0, readback,
-                               (size_t)bytes) != SSU_OK) {
-            fputs("pattern read failed\n", stderr);
+        if (read_pattern_segments(logdevs, logdev_count, readback,
+                                  bytes) != 0) {
             goto out;
         }
 
@@ -266,20 +413,20 @@ static int run_pattern_io(const ssu_logdev_info_t *logdev, uint64_t bytes,
     }
 
     if (mode == SMOKE_IO_WRITE_ONLY) {
-        printf("ssu_smoke wrote %s %llu bytes via %s\n",
-               logdev->logical_dev,
+        printf("ssu_smoke wrote %s %llu bytes via %u mappings\n",
+               logdevs[0].logical_dev,
                (unsigned long long)bytes,
-               logdev->phys_dev);
+               logdev_count);
     } else if (mode == SMOKE_IO_READ_ONLY) {
-        printf("ssu_smoke read ok %s %llu bytes via %s\n",
-               logdev->logical_dev,
+        printf("ssu_smoke read ok %s %llu bytes via %u mappings\n",
+               logdevs[0].logical_dev,
                (unsigned long long)bytes,
-               logdev->phys_dev);
+               logdev_count);
     } else {
-        printf("ssu_smoke ok %s %llu bytes via %s\n",
-               logdev->logical_dev,
+        printf("ssu_smoke ok %s %llu bytes via %u mappings\n",
+               logdevs[0].logical_dev,
                (unsigned long long)bytes,
-               logdev->phys_dev);
+               logdev_count);
     }
     rc = 0;
 
@@ -322,7 +469,8 @@ static int run_sdk_flow(const smoke_options_t *opts)
 {
     ssu_alloc_result_t alloc_result;
     ssu_mount_req_t mount_req = {};
-    ssu_logdev_info_t logdev;
+    ssu_logdev_info_t *logdevs = NULL;
+    uint32_t logdev_count = 0;
     int allocated = 0;
     int mounted = 0;
     int rc = 1;
@@ -368,13 +516,15 @@ static int run_sdk_flow(const smoke_options_t *opts)
     }
 
     if (opts->do_io) {
-        memset(&logdev, 0, sizeof(logdev));
-        if (!mounted || !find_logdev_sdk(opts->logical_dev, &logdev)) {
+        if (!mounted ||
+            !collect_logdev_sdk(opts->logical_dev, &logdevs,
+                                &logdev_count)) {
             fprintf(stderr, "logdev not found: %s\n", opts->logical_dev);
             goto cleanup;
         }
 
-        if (run_pattern_io(&logdev, opts->bytes, opts->io_mode) != 0) {
+        if (run_pattern_io(logdevs, logdev_count, opts->bytes,
+                           opts->io_mode) != 0) {
             goto cleanup;
         }
     }
@@ -404,6 +554,7 @@ cleanup:
         }
     }
 
+    free(logdevs);
     return rc;
 }
 
@@ -437,7 +588,8 @@ static void usage(void)
 int main(int argc, char **argv)
 {
     smoke_options_t opts = {};
-    ssu_logdev_info_t logdev;
+    ssu_logdev_info_t *logdevs = NULL;
+    uint32_t logdev_count = 0;
     int i;
 
     opts.host_id = "local";
@@ -558,11 +710,12 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    memset(&logdev, 0, sizeof(logdev));
-    if (!find_logdev_manager(opts.logical_dev, &logdev)) {
+    if (!collect_logdev_manager(opts.logical_dev, &logdevs, &logdev_count)) {
         fprintf(stderr, "logdev not found: %s\n", opts.logical_dev);
         return 1;
     }
 
-    return run_pattern_io(&logdev, opts.bytes, opts.io_mode);
+    i = run_pattern_io(logdevs, logdev_count, opts.bytes, opts.io_mode);
+    free(logdevs);
+    return i;
 }

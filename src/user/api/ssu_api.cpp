@@ -310,8 +310,8 @@ ssu_err_t ssu_resource_alloc(const ssu_alloc_req_t *req,
                              ssu_alloc_extent_t *out_extents,
                              uint32_t *inout_extent_count)
 {
-    ssu_alloc_extent_t tmp_extents[1];
-    uint32_t tmp_extent_count = 1;
+    ssu_alloc_extent_t *tmp_extents = NULL;
+    uint32_t tmp_extent_count = 0;
     ssu_err_t err;
 
     if (req == NULL || out == NULL) {
@@ -332,8 +332,22 @@ ssu_err_t ssu_resource_alloc(const ssu_alloc_req_t *req,
     }
 
     if (out_extents == NULL && inout_extent_count == NULL) {
-        out_extents = tmp_extents;
-        inout_extent_count = &tmp_extent_count;
+        err = ssu_controller_alloc(default_plugin(), req, out, NULL,
+                                   &tmp_extent_count);
+        if (err != SSU_ERR_BUFFER_TOO_SMALL) {
+            return err;
+        }
+
+        tmp_extents = (ssu_alloc_extent_t *)calloc(tmp_extent_count,
+                                                   sizeof(*tmp_extents));
+        if (tmp_extents == NULL) {
+            return SSU_ERR_NO_RESOURCE;
+        }
+
+        err = ssu_controller_alloc(default_plugin(), req, out, tmp_extents,
+                                   &tmp_extent_count);
+        free(tmp_extents);
+        return err;
     }
 
     return ssu_controller_alloc(default_plugin(), req, out, out_extents,
@@ -413,8 +427,6 @@ ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
 {
     ssu_alloc_req_t resource_req = {};
     ssu_alloc_result_t alloc_result;
-    ssu_alloc_extent_t extent;
-    uint32_t extent_count = 1;
     ssu_err_t err;
 
     if (req == NULL || out == NULL || req->size_bytes == 0 ||
@@ -450,9 +462,7 @@ ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
     resource_req.tenant = req->tenant_id;
 
     memset(&alloc_result, 0, sizeof(alloc_result));
-    memset(&extent, 0, sizeof(extent));
-    err = ssu_resource_alloc(&resource_req, &alloc_result, &extent,
-                             &extent_count);
+    err = ssu_resource_alloc(&resource_req, &alloc_result, NULL, NULL);
     if (err != SSU_OK) {
         return err;
     }

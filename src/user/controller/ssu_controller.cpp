@@ -69,23 +69,71 @@ static uint32_t active_logdev_count(void)
     return count;
 }
 
-static int is_empty_string(const char *s)
+static int resource_is_online(const ssu_resource_info_t *resource)
 {
-    return s == NULL || s[0] == '\0';
+    return resource != NULL && strcmp(resource->state, "ONLINE") == 0;
 }
 
-static controller_allocation_t *find_allocation(const char *allocate_id)
+static uint32_t online_pool_indexes(uint32_t *indexes)
 {
+    uint32_t count = 0;
+    uint32_t i;
+
+    for (i = 0; i < pool_count; i++) {
+        if (resource_is_online(&pool[i])) {
+            indexes[count++] = i;
+        }
+    }
+
+    return count;
+}
+
+static uint32_t active_allocation_extent_count(const char *allocate_id)
+{
+    uint32_t count = 0;
     uint32_t i;
 
     for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
         if (allocations[i].active &&
             strcmp(allocations[i].info.allocate_id, allocate_id) == 0) {
-            return &allocations[i];
+            count++;
         }
     }
 
-    return NULL;
+    return count;
+}
+
+static uint32_t free_allocation_slot_count(void)
+{
+    uint32_t count = 0;
+    uint32_t i;
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
+        if (!allocations[i].active) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+static uint32_t free_logdev_slot_count(void)
+{
+    uint32_t count = 0;
+    uint32_t i;
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_LOGDEVS; i++) {
+        if (!logdevs[i].active) {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+static int is_empty_string(const char *s)
+{
+    return s == NULL || s[0] == '\0';
 }
 
 static controller_logdev_t *find_logdev_by_dev(const char *logical_dev)
@@ -114,6 +162,32 @@ static int allocation_has_logdev(const char *allocate_id)
     }
 
     return 0;
+}
+
+static void set_allocation_state(const char *allocate_id, const char *state)
+{
+    uint32_t i;
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
+        if (allocations[i].active &&
+            strcmp(allocations[i].info.allocate_id, allocate_id) == 0) {
+            copy_cstr(allocations[i].info.state,
+                      sizeof(allocations[i].info.state), state);
+        }
+    }
+}
+
+static controller_allocation_t *next_free_allocation_slot(void)
+{
+    uint32_t i;
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
+        if (!allocations[i].active) {
+            return &allocations[i];
+        }
+    }
+
+    return NULL;
 }
 
 static int released_id_exists(const char *allocate_id)
@@ -254,13 +328,18 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
                                ssu_alloc_extent_t *out_extents,
                                uint32_t *inout_extent_count)
 {
-    controller_allocation_t *slot = NULL;
+    controller_allocation_t *created_slots[SSU_CONTROLLER_MAX_ALLOCATIONS];
     ssu_extent_create_req_t extent_req;
+    uint32_t pool_indexes[SSU_CONTROLLER_MAX_RESOURCES];
     char allocate_id[64];
     char ns_id[32];
-    uint64_t phys_sector = 0;
+    uint32_t extent_count;
+    uint64_t logical_offset = 0;
+    uint64_t base_length;
+    uint64_t remainder;
     ssu_err_t err;
     uint32_t i;
+    uint32_t created_count = 0;
 
     if (plugin == NULL || plugin->create_ns == NULL || req == NULL ||
         out == NULL || inout_extent_count == NULL) {
@@ -271,84 +350,129 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
         return SSU_ERR_UNSUPPORTED;
     }
 
-    if (pool_count == 0) {
+    if (req->size_bytes == 0) {
+        return SSU_ERR_INVALID;
+    }
+
+    extent_count = online_pool_indexes(pool_indexes);
+    if (extent_count == 0) {
         return SSU_ERR_NO_RESOURCE;
     }
 
-    if (out_extents == NULL || *inout_extent_count < 1) {
-        *inout_extent_count = 1;
+    if ((uint64_t)extent_count > req->size_bytes) {
+        extent_count = (uint32_t)req->size_bytes;
+    }
+
+    if (out_extents == NULL || *inout_extent_count < extent_count) {
+        *inout_extent_count = extent_count;
         return SSU_ERR_BUFFER_TOO_SMALL;
     }
 
-    for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
-        if (!allocations[i].active) {
-            slot = &allocations[i];
-            break;
-        }
-    }
-
-    if (slot == NULL) {
+    if (free_allocation_slot_count() < extent_count) {
         return SSU_ERR_NO_RESOURCE;
     }
 
     snprintf(allocate_id, sizeof(allocate_id), "alloc-%llu",
              (unsigned long long)next_allocation_id);
 
-    memset(&extent_req, 0, sizeof(extent_req));
-    extent_req.allocate_id = allocate_id;
-    extent_req.ssu_id = pool[0].ssu_id;
-    extent_req.logical_offset = 0;
-    extent_req.length = req->size_bytes;
-    extent_req.phys_offset_hint = 0;
-    extent_req.policy = req->reliability;
-    extent_req.role_index = 0;
-    extent_req.tenant = req->tenant;
+    memset(out, 0, sizeof(*out));
+    memset(out_extents, 0, sizeof(out_extents[0]) * extent_count);
+    memset(created_slots, 0, sizeof(created_slots));
 
-    memset(ns_id, 0, sizeof(ns_id));
-    err = plugin->create_ns(&extent_req, ns_id, sizeof(ns_id), &phys_sector);
-    if (err != SSU_OK) {
-        return err;
+    base_length = req->size_bytes / extent_count;
+    remainder = req->size_bytes % extent_count;
+    for (i = 0; i < extent_count; i++) {
+        controller_allocation_t *slot = next_free_allocation_slot();
+        uint32_t pool_index = pool_indexes[i];
+        uint64_t length = base_length + (i < remainder ? 1ULL : 0ULL);
+        uint64_t phys_sector = 0;
+
+        if (slot == NULL) {
+            err = SSU_ERR_NO_RESOURCE;
+            goto rollback;
+        }
+
+        memset(&extent_req, 0, sizeof(extent_req));
+        extent_req.allocate_id = allocate_id;
+        extent_req.ssu_id = pool[pool_index].ssu_id;
+        extent_req.logical_offset = logical_offset;
+        extent_req.length = length;
+        extent_req.phys_offset_hint = 0;
+        extent_req.policy = req->reliability;
+        extent_req.role_index = i;
+        extent_req.tenant = req->tenant;
+
+        memset(ns_id, 0, sizeof(ns_id));
+        err = plugin->create_ns(&extent_req, ns_id, sizeof(ns_id),
+                                &phys_sector);
+        if (err != SSU_OK) {
+            goto rollback;
+        }
+
+        memset(slot, 0, sizeof(*slot));
+        slot->active = 1;
+        copy_cstr(slot->info.allocate_id, sizeof(slot->info.allocate_id),
+                  allocate_id);
+        copy_cstr(slot->info.tenant, sizeof(slot->info.tenant), req->tenant);
+        slot->info.policy = req->reliability;
+        slot->info.share_type = req->share_type;
+        copy_cstr(slot->info.state, sizeof(slot->info.state), "ACTIVE");
+        copy_cstr(slot->info.ssu_id, sizeof(slot->info.ssu_id),
+                  pool[pool_index].ssu_id);
+        copy_cstr(slot->info.ns_id, sizeof(slot->info.ns_id), ns_id);
+        slot->info.logical_offset = logical_offset;
+        slot->info.length = length;
+        slot->info.phys_sector = phys_sector;
+        slot->info.role_index = i;
+        created_slots[created_count++] = slot;
+
+        copy_cstr(out_extents[i].ssu_id, sizeof(out_extents[i].ssu_id),
+                  pool[pool_index].ssu_id);
+        copy_cstr(out_extents[i].host_id, sizeof(out_extents[i].host_id),
+                  pool[pool_index].host_id);
+        copy_cstr(out_extents[i].ns_id, sizeof(out_extents[i].ns_id),
+                  ns_id);
+        out_extents[i].logical_offset = logical_offset;
+        out_extents[i].length = length;
+
+        pool[pool_index].used_bytes += length;
+        logical_offset += length;
     }
 
-    memset(slot, 0, sizeof(*slot));
-    slot->active = 1;
-    copy_cstr(slot->info.allocate_id, sizeof(slot->info.allocate_id),
-              allocate_id);
-    copy_cstr(slot->info.tenant, sizeof(slot->info.tenant), req->tenant);
-    slot->info.policy = req->reliability;
-    slot->info.share_type = req->share_type;
-    copy_cstr(slot->info.state, sizeof(slot->info.state), "ACTIVE");
-    copy_cstr(slot->info.ssu_id, sizeof(slot->info.ssu_id), pool[0].ssu_id);
-    copy_cstr(slot->info.ns_id, sizeof(slot->info.ns_id), ns_id);
-    slot->info.logical_offset = 0;
-    slot->info.length = req->size_bytes;
-    slot->info.phys_sector = phys_sector;
-    slot->info.role_index = 0;
-
-    memset(out, 0, sizeof(*out));
     copy_cstr(out->allocate_id, sizeof(out->allocate_id), allocate_id);
     out->logical_size_bytes = req->size_bytes;
-    out->extent_count = 1;
-
-    memset(out_extents, 0, sizeof(out_extents[0]));
-    copy_cstr(out_extents[0].ssu_id, sizeof(out_extents[0].ssu_id),
-              pool[0].ssu_id);
-    copy_cstr(out_extents[0].host_id, sizeof(out_extents[0].host_id),
-              pool[0].host_id);
-    copy_cstr(out_extents[0].ns_id, sizeof(out_extents[0].ns_id), ns_id);
-    out_extents[0].logical_offset = 0;
-    out_extents[0].length = req->size_bytes;
-    *inout_extent_count = 1;
-
-    pool[0].used_bytes += req->size_bytes;
+    out->extent_count = extent_count;
+    *inout_extent_count = extent_count;
     next_allocation_id++;
     return SSU_OK;
+
+rollback:
+    while (created_count > 0) {
+        controller_allocation_t *slot = created_slots[created_count - 1];
+        int pool_index = find_resource_index(pool, pool_count,
+                                             slot->info.ssu_id);
+
+        if (plugin->delete_ns != NULL) {
+            plugin->delete_ns(slot->info.ssu_id, slot->info.ns_id);
+        }
+        if (pool_index >= 0 &&
+            pool[pool_index].used_bytes >= slot->info.length) {
+            pool[pool_index].used_bytes -= slot->info.length;
+        }
+        memset(slot, 0, sizeof(*slot));
+        created_count--;
+    }
+
+    memset(out, 0, sizeof(*out));
+    memset(out_extents, 0, sizeof(out_extents[0]) * extent_count);
+    return err;
 }
 
 ssu_err_t ssu_controller_release(const ssu_plugin_ops_t *plugin,
                                  const char *allocate_id)
 {
     uint32_t i;
+    int found = 0;
 
     if (plugin == NULL || plugin->delete_ns == NULL || allocate_id == NULL ||
         allocate_id[0] == '\0') {
@@ -362,20 +486,27 @@ ssu_err_t ssu_controller_release(const ssu_plugin_ops_t *plugin,
     for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
         if (allocations[i].active &&
             strcmp(allocations[i].info.allocate_id, allocate_id) == 0) {
+            int pool_index;
             ssu_err_t err = plugin->delete_ns(allocations[i].info.ssu_id,
                                               allocations[i].info.ns_id);
             if (err != SSU_OK) {
                 return err;
             }
 
-            if (pool_count > 0 &&
-                pool[0].used_bytes >= allocations[i].info.length) {
-                pool[0].used_bytes -= allocations[i].info.length;
+            pool_index = find_resource_index(pool, pool_count,
+                                             allocations[i].info.ssu_id);
+            if (pool_index >= 0 &&
+                pool[pool_index].used_bytes >= allocations[i].info.length) {
+                pool[pool_index].used_bytes -= allocations[i].info.length;
             }
             allocations[i].active = 0;
-            remember_released_id(allocate_id);
-            return SSU_OK;
+            found = 1;
         }
+    }
+
+    if (found) {
+        remember_released_id(allocate_id);
+        return SSU_OK;
     }
 
     return released_id_exists(allocate_id) ? SSU_OK : SSU_ERR_NOT_FOUND;
@@ -412,9 +543,11 @@ ssu_err_t ssu_controller_query_allocations(ssu_allocation_info_t *out,
 ssu_err_t ssu_controller_mount(const ssu_plugin_ops_t *plugin,
                                const ssu_mount_req_t *req)
 {
-    controller_allocation_t *allocation;
-    controller_logdev_t *slot = NULL;
-    char phys_dev[64];
+    controller_allocation_t *allocation = NULL;
+    controller_allocation_t *allocation_rows[SSU_CONTROLLER_MAX_ALLOCATIONS];
+    controller_logdev_t *logdev_slots[SSU_CONTROLLER_MAX_LOGDEVS];
+    char phys_devs[SSU_CONTROLLER_MAX_LOGDEVS][64];
+    uint32_t extent_count = 0;
     ssu_err_t err;
     uint32_t i;
 
@@ -425,8 +558,20 @@ ssu_err_t ssu_controller_mount(const ssu_plugin_ops_t *plugin,
         return SSU_ERR_INVALID;
     }
 
-    allocation = find_allocation(req->allocate_id);
-    if (allocation == NULL) {
+    memset(allocation_rows, 0, sizeof(allocation_rows));
+    memset(logdev_slots, 0, sizeof(logdev_slots));
+    memset(phys_devs, 0, sizeof(phys_devs));
+    for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
+        if (allocations[i].active &&
+            strcmp(allocations[i].info.allocate_id, req->allocate_id) == 0) {
+            if (allocation == NULL) {
+                allocation = &allocations[i];
+            }
+            allocation_rows[extent_count++] = &allocations[i];
+        }
+    }
+
+    if (extent_count == 0) {
         return SSU_ERR_NOT_FOUND;
     }
 
@@ -439,22 +584,35 @@ ssu_err_t ssu_controller_mount(const ssu_plugin_ops_t *plugin,
         return SSU_ERR_BUSY;
     }
 
-    for (i = 0; i < SSU_CONTROLLER_MAX_LOGDEVS; i++) {
-        if (!logdevs[i].active) {
-            slot = &logdevs[i];
-            break;
-        }
-    }
-
-    if (slot == NULL) {
+    if (free_logdev_slot_count() < extent_count) {
         return SSU_ERR_NO_RESOURCE;
     }
 
-    memset(phys_dev, 0, sizeof(phys_dev));
-    err = plugin->connect(allocation->info.ssu_id, phys_dev,
-                          sizeof(phys_dev));
-    if (err != SSU_OK) {
-        return err;
+    for (i = 0; i < SSU_CONTROLLER_MAX_LOGDEVS && extent_count > 0; i++) {
+        uint32_t slot_index;
+
+        if (logdevs[i].active) {
+            continue;
+        }
+
+        for (slot_index = 0; slot_index < extent_count; slot_index++) {
+            if (logdev_slots[slot_index] == NULL) {
+                logdev_slots[slot_index] = &logdevs[i];
+                break;
+            }
+        }
+    }
+
+    for (i = 0; i < extent_count; i++) {
+        if (logdev_slots[i] == NULL) {
+            return SSU_ERR_NO_RESOURCE;
+        }
+
+        err = plugin->connect(allocation_rows[i]->info.ssu_id, phys_devs[i],
+                              sizeof(phys_devs[i]));
+        if (err != SSU_OK) {
+            return err;
+        }
     }
 
     err = plugin->mount(req->allocate_id, req->host_id, req->logical_dev);
@@ -462,21 +620,26 @@ ssu_err_t ssu_controller_mount(const ssu_plugin_ops_t *plugin,
         return err;
     }
 
-    memset(slot, 0, sizeof(*slot));
-    slot->active = 1;
-    copy_cstr(slot->info.logical_dev, sizeof(slot->info.logical_dev),
-              req->logical_dev);
-    copy_cstr(slot->info.host_id, sizeof(slot->info.host_id), req->host_id);
-    copy_cstr(slot->info.allocate_id, sizeof(slot->info.allocate_id),
-              req->allocate_id);
-    slot->info.logical_offset = allocation->info.logical_offset;
-    slot->info.length = allocation->info.length;
-    copy_cstr(slot->info.phys_dev, sizeof(slot->info.phys_dev), phys_dev);
-    copy_cstr(slot->info.ns_id, sizeof(slot->info.ns_id),
-              allocation->info.ns_id);
-    slot->info.phys_sector = allocation->info.phys_sector;
-    copy_cstr(allocation->info.state, sizeof(allocation->info.state),
-              "MOUNTED");
+    for (i = 0; i < extent_count; i++) {
+        controller_logdev_t *slot = logdev_slots[i];
+
+        memset(slot, 0, sizeof(*slot));
+        slot->active = 1;
+        copy_cstr(slot->info.logical_dev, sizeof(slot->info.logical_dev),
+                  req->logical_dev);
+        copy_cstr(slot->info.host_id, sizeof(slot->info.host_id),
+                  req->host_id);
+        copy_cstr(slot->info.allocate_id, sizeof(slot->info.allocate_id),
+                  req->allocate_id);
+        slot->info.logical_offset = allocation_rows[i]->info.logical_offset;
+        slot->info.length = allocation_rows[i]->info.length;
+        copy_cstr(slot->info.phys_dev, sizeof(slot->info.phys_dev),
+                  phys_devs[i]);
+        copy_cstr(slot->info.ns_id, sizeof(slot->info.ns_id),
+                  allocation_rows[i]->info.ns_id);
+        slot->info.phys_sector = allocation_rows[i]->info.phys_sector;
+    }
+    set_allocation_state(req->allocate_id, "MOUNTED");
 
     return SSU_OK;
 }
@@ -485,8 +648,9 @@ ssu_err_t ssu_controller_unmount(const ssu_plugin_ops_t *plugin,
                                  const char *logical_dev)
 {
     controller_logdev_t *logdev;
-    controller_allocation_t *allocation;
+    char allocate_id[64];
     ssu_err_t err;
+    uint32_t i;
 
     if (plugin == NULL || plugin->unmount == NULL ||
         is_empty_string(logical_dev)) {
@@ -498,19 +662,24 @@ ssu_err_t ssu_controller_unmount(const ssu_plugin_ops_t *plugin,
         return SSU_ERR_NOT_FOUND;
     }
 
+    copy_cstr(allocate_id, sizeof(allocate_id), logdev->info.allocate_id);
     err = plugin->unmount(logical_dev);
     if (err != SSU_OK) {
         return err;
     }
 
-    allocation = find_allocation(logdev->info.allocate_id);
-    memset(logdev, 0, sizeof(*logdev));
-    if (allocation != NULL) {
-        const char *state = allocation_has_logdev(allocation->info.allocate_id) ?
+    for (i = 0; i < SSU_CONTROLLER_MAX_LOGDEVS; i++) {
+        if (logdevs[i].active &&
+            strcmp(logdevs[i].info.logical_dev, logical_dev) == 0) {
+            memset(&logdevs[i], 0, sizeof(logdevs[i]));
+        }
+    }
+
+    if (active_allocation_extent_count(allocate_id) > 0) {
+        const char *state = allocation_has_logdev(allocate_id) ?
                             "MOUNTED" : "ACTIVE";
 
-        copy_cstr(allocation->info.state, sizeof(allocation->info.state),
-                  state);
+        set_allocation_state(allocate_id, state);
     }
 
     return SSU_OK;
