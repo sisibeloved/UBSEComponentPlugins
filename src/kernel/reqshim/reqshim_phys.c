@@ -10,7 +10,7 @@
 struct ssu_reqshim_bdev_handle {
     struct block_device *bdev;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-    struct file *file;
+    struct bdev_handle *handle;
 #endif
 };
 
@@ -23,13 +23,13 @@ static int ssu_reqshim_open_bdev(const char *path,
     memset(handle, 0, sizeof(*handle));
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-    handle->file = bdev_file_open_by_path(path,
-                                          BLK_OPEN_READ | BLK_OPEN_WRITE,
-                                          NULL, NULL);
-    if (IS_ERR(handle->file))
-        return PTR_ERR(handle->file);
+    handle->handle = bdev_open_by_path(path,
+                                       BLK_OPEN_READ | BLK_OPEN_WRITE,
+                                       NULL, NULL);
+    if (IS_ERR(handle->handle))
+        return PTR_ERR(handle->handle);
 
-    handle->bdev = file_bdev(handle->file);
+    handle->bdev = handle->handle->bdev;
 #else
     handle->bdev = blkdev_get_by_path(path, FMODE_READ | FMODE_WRITE, NULL);
     if (IS_ERR(handle->bdev))
@@ -45,7 +45,7 @@ static void ssu_reqshim_close_bdev(struct ssu_reqshim_bdev_handle *handle)
         return;
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(6, 5, 0)
-    fput(handle->file);
+    bdev_release(handle->handle);
 #else
     blkdev_put(handle->bdev, FMODE_READ | FMODE_WRITE);
 #endif

@@ -29,6 +29,18 @@ static int expect_contains(const std::string &label,
     return 1;
 }
 
+static int expect_not_contains(const std::string &label,
+                               const std::string &text,
+                               const std::string &needle)
+{
+    if (text.find(needle) == std::string::npos) {
+        return 0;
+    }
+
+    std::cerr << label << " should not contain " << needle << "\n";
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     std::string root;
@@ -58,6 +70,11 @@ int main(int argc, char **argv)
     failed |= expect_contains("reqshim_blk", blk, "queue_rq");
     failed |= expect_contains("reqshim_blk", blk, "blk_mq_alloc_disk");
     failed |= expect_contains("reqshim_phys", phys, "submit_bio_wait");
+    failed |= expect_contains("reqshim_phys", phys, "bdev_open_by_path");
+    failed |= expect_contains("reqshim_phys", phys, "bdev_release");
+    failed |= expect_not_contains("reqshim_phys", phys,
+                                  "bdev_file_open_by_path");
+    failed |= expect_not_contains("reqshim_phys", phys, "file_bdev");
 
     return failed == 0 ? 0 : 1;
 }
