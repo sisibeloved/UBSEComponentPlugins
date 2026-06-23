@@ -17,6 +17,7 @@ typedef struct {
 
 static api_request_t api_requests[SSU_API_MAX_REQUESTS];
 static uint32_t next_api_device_index;
+static int api_initialized;
 
 static int is_empty_string(const char *s)
 {
@@ -40,6 +41,21 @@ static size_t query_elem_size(ssu_query_type_t type)
 static const ssu_plugin_ops_t *default_plugin(void)
 {
     return ssu_plugin_entry();
+}
+
+static ssu_err_t ensure_api_initialized(void)
+{
+    if (api_initialized) {
+        return SSU_OK;
+    }
+
+    return ssu_api_init(NULL);
+}
+
+static void reset_api_request_cache(void)
+{
+    memset(api_requests, 0, sizeof(api_requests));
+    next_api_device_index = 0;
 }
 
 static void copy_cstr(char *dst, size_t n, const char *src)
@@ -379,6 +395,11 @@ ssu_err_t ssu_resource_alloc(const ssu_alloc_req_t *req,
     uint32_t tmp_extent_count = 0;
     ssu_err_t err;
 
+    err = ensure_api_initialized();
+    if (err != SSU_OK) {
+        return err;
+    }
+
     if (req == NULL || out == NULL) {
         return SSU_ERR_INVALID;
     }
@@ -421,6 +442,11 @@ ssu_err_t ssu_resource_alloc(const ssu_alloc_req_t *req,
 
 ssu_err_t ssu_resource_mount(const ssu_mount_req_t *req)
 {
+    ssu_err_t err = ensure_api_initialized();
+    if (err != SSU_OK) {
+        return err;
+    }
+
     if (req == NULL || is_empty_string(req->allocate_id) ||
         is_empty_string(req->host_id) || req->logical_dev[0] == '\0') {
         return SSU_ERR_INVALID;
@@ -431,6 +457,11 @@ ssu_err_t ssu_resource_mount(const ssu_mount_req_t *req)
 
 ssu_err_t ssu_resource_unmount(const char *logical_dev)
 {
+    ssu_err_t err = ensure_api_initialized();
+    if (err != SSU_OK) {
+        return err;
+    }
+
     if (is_empty_string(logical_dev)) {
         return SSU_ERR_INVALID;
     }
@@ -440,6 +471,11 @@ ssu_err_t ssu_resource_unmount(const char *logical_dev)
 
 ssu_err_t ssu_resource_release(const char *allocate_id)
 {
+    ssu_err_t err = ensure_api_initialized();
+    if (err != SSU_OK) {
+        return err;
+    }
+
     if (is_empty_string(allocate_id)) {
         return SSU_ERR_INVALID;
     }
@@ -453,6 +489,12 @@ ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
                              uint32_t *inout_count)
 {
     size_t expected_size;
+    ssu_err_t err;
+
+    err = ensure_api_initialized();
+    if (err != SSU_OK) {
+        return err;
+    }
 
     if (req == NULL || inout_count == NULL) {
         return SSU_ERR_INVALID;
@@ -464,7 +506,7 @@ ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
     }
 
     if (req->type == SSU_QUERY_POOL) {
-        ssu_err_t err = refresh_default_pool();
+        err = refresh_default_pool();
         if (err != SSU_OK) {
             return err;
         }
@@ -493,6 +535,11 @@ ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
     ssu_alloc_req_t resource_req = {};
     ssu_alloc_result_t alloc_result;
     ssu_err_t err;
+
+    err = ensure_api_initialized();
+    if (err != SSU_OK) {
+        return err;
+    }
 
     if (req == NULL || out == NULL || req->size_bytes == 0 ||
         is_empty_string(req->user_id) || req->host_ids == NULL ||
@@ -546,10 +593,57 @@ ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
     return SSU_OK;
 }
 
+ssu_err_t ssu_api_init(const ssu_api_init_options_t *opts)
+{
+    if (opts != NULL && opts->struct_size < sizeof(*opts)) {
+        return SSU_ERR_INVALID;
+    }
+
+    if (default_plugin() == NULL) {
+        return SSU_ERR_INTERNAL;
+    }
+
+    api_initialized = 1;
+    return SSU_OK;
+}
+
+void ssu_api_fini(void)
+{
+    api_initialized = 0;
+    reset_api_request_cache();
+}
+
+const ssu_api_ops_t *ssu_api_entry(void)
+{
+    static const ssu_api_ops_t ops = {
+        sizeof(ssu_api_ops_t),
+        ssu_api_init,
+        ssu_api_fini,
+        ssu_api_allocate,
+        ssu_api_free,
+        ssu_api_list,
+        ssu_api_allocate_result_get,
+        ssu_api_mount,
+        ssu_api_unmount,
+        ssu_resource_alloc,
+        ssu_resource_mount,
+        ssu_resource_unmount,
+        ssu_resource_release,
+        ssu_resource_query,
+    };
+
+    return &ops;
+}
+
 ssu_err_t ssu_api_free(const char *device_path)
 {
     char request_id[64];
     ssu_err_t err;
+
+    err = ensure_api_initialized();
+    if (err != SSU_OK) {
+        return err;
+    }
 
     memset(request_id, 0, sizeof(request_id));
     err = request_id_from_device_path(device_path, request_id,
@@ -570,6 +664,10 @@ ssu_err_t ssu_api_list(ssu_resource_info_t *out,
                        uint32_t *inout_count)
 {
     ssu_query_req_t req = {};
+    ssu_err_t err = ensure_api_initialized();
+    if (err != SSU_OK) {
+        return err;
+    }
 
     req.type = SSU_QUERY_POOL;
     return ssu_resource_query(&req, out, sizeof(ssu_resource_info_t),
@@ -581,7 +679,10 @@ ssu_err_t ssu_api_allocate_result_get(
     ssu_api_allocate_result_info_t *out)
 {
     api_request_t *slot;
-    ssu_err_t err;
+    ssu_err_t err = ensure_api_initialized();
+    if (err != SSU_OK) {
+        return err;
+    }
 
     if (is_empty_string(request_id) || out == NULL) {
         return SSU_ERR_INVALID;
@@ -623,6 +724,11 @@ ssu_err_t ssu_api_mount(const char *device_path,
     char request_id[64];
     ssu_err_t err;
 
+    err = ensure_api_initialized();
+    if (err != SSU_OK) {
+        return err;
+    }
+
     if (is_empty_string(device_path) || is_empty_string(host_id)) {
         return SSU_ERR_INVALID;
     }
@@ -647,6 +753,11 @@ ssu_err_t ssu_api_mount(const char *device_path,
 
 ssu_err_t ssu_api_unmount(const char *device_path)
 {
+    ssu_err_t err = ensure_api_initialized();
+    if (err != SSU_OK) {
+        return err;
+    }
+
     if (is_empty_string(device_path)) {
         return SSU_ERR_INVALID;
     }

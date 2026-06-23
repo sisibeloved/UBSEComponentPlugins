@@ -120,6 +120,11 @@ typedef struct {
     char request_id[64];
 } ssu_api_allocate_resp_t;
 
+typedef struct {
+    /* Set to sizeof(ssu_api_init_options_t). Reserved for ABI extension. */
+    size_t struct_size;
+} ssu_api_init_options_t;
+
 typedef enum {
     SSU_OK = 0,
     SSU_ERR_INVALID = -1,
@@ -150,6 +155,37 @@ typedef struct {
     char error_message[128];
 } ssu_api_allocate_result_info_t;
 
+typedef struct {
+    size_t struct_size;
+
+    ssu_err_t (*init)(const ssu_api_init_options_t *opts);
+    void (*fini)(void);
+
+    ssu_err_t (*allocate)(const ssu_api_allocate_req_t *req,
+                          ssu_api_allocate_resp_t *out);
+    ssu_err_t (*free)(const char *device_path);
+    ssu_err_t (*list)(ssu_resource_info_t *out,
+                      uint32_t *inout_count);
+    ssu_err_t (*allocate_result_get)(
+        const char *request_id,
+        ssu_api_allocate_result_info_t *out);
+    ssu_err_t (*mount)(const char *device_path,
+                       const char *host_id);
+    ssu_err_t (*unmount)(const char *device_path);
+
+    ssu_err_t (*resource_alloc)(const ssu_alloc_req_t *req,
+                                ssu_alloc_result_t *out,
+                                ssu_alloc_extent_t *out_extents,
+                                uint32_t *inout_extent_count);
+    ssu_err_t (*resource_mount)(const ssu_mount_req_t *req);
+    ssu_err_t (*resource_unmount)(const char *logical_dev);
+    ssu_err_t (*resource_release)(const char *allocate_id);
+    ssu_err_t (*resource_query)(const ssu_query_req_t *req,
+                                void *out_array,
+                                size_t out_elem_size,
+                                uint32_t *inout_count);
+} ssu_api_ops_t;
+
 ssu_err_t ssu_resource_alloc(const ssu_alloc_req_t *req,
                              ssu_alloc_result_t *out,
                              ssu_alloc_extent_t *out_extents,
@@ -168,6 +204,20 @@ ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
 
 ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
                            ssu_api_allocate_resp_t *out);
+
+/* Call after dlopen/dlsym before the first SDK operation. Passing NULL uses
+ * the default SDK configuration. Existing direct-link callers are still lazily
+ * initialized for compatibility.
+ */
+ssu_err_t ssu_api_init(const ssu_api_init_options_t *opts);
+
+/* Release SDK process-local caches before dlclose. */
+void ssu_api_fini(void);
+
+/* dlopen users only need to dlsym this single entry point. The returned
+ * function table is process-static and valid until dlclose.
+ */
+const ssu_api_ops_t *ssu_api_entry(void);
 
 ssu_err_t ssu_api_free(const char *device_path);
 

@@ -89,6 +89,25 @@ if get_option('vendor') == 'mock'
   )
 
   test('api_logical', api_logical)
+
+  dlopen_deps = [ssu_headers_dep]
+  dl_dep = cpp.find_library('dl', required: false)
+  if dl_dep.found()
+    dlopen_deps += dl_dep
+  endif
+
+  api_dlopen = executable(
+    'api_dlopen',
+    sources: ['api_dlopen.cpp'],
+    include_directories: inc,
+    dependencies: dlopen_deps,
+  )
+
+  test(
+    'api_dlopen',
+    api_dlopen,
+    args: [libssu_api.full_path()],
+  )
 endif
 
 dataplane_mock = executable(
