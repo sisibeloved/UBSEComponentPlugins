@@ -6,6 +6,7 @@ root="/tmp/ssu-lbc-mock-error-$$"
 prefix="$root/prefix"
 dev_dir="$root/dev"
 configfs_dir="$root/configfs"
+config_file="$root/ssu_lbc_mock.conf"
 socket="$root/ssu-mgr.fifo"
 aid_file="$root/aid"
 log_file="$root/lbc.log"
@@ -16,11 +17,13 @@ ubsectl="$build_dir/tools/ubsectl"
 rm -rf "$root"
 mkdir -p "$prefix/mock" "$dev_dir" "$configfs_dir/$subnqn/namespaces"
 
-cat > "$prefix/mock/ssu_lbc_mock.conf" <<EOF
+cat > "$config_file" <<EOF
 dev_dir=$dev_dir
 configfs_dir=$configfs_dir
 log_file=$log_file
 EOF
+
+test ! -e "$prefix/mock/ssu_lbc_mock.conf"
 
 cat > "$prefix/mock/setup_mock_target.sh" <<EOF
 #!/bin/sh
@@ -48,7 +51,8 @@ cleanup() {
 trap cleanup EXIT
 
 (
-    LBC_PREFIX="$prefix" "$ssu_mgr" --role=manager --socket "$socket"
+    LBC_PREFIX="$prefix" SSU_LBC_MOCK_CONFIG="$config_file" \
+        "$ssu_mgr" --role=manager --socket "$socket"
 ) &
 mgr_pid=$!
 

@@ -1,12 +1,3 @@
-api_gating = executable(
-  'api_gating',
-  sources: ['api_gating.cpp'],
-  include_directories: inc,
-  dependencies: [ssu_api_dep],
-)
-
-test('api_gating', api_gating)
-
 mock_pool = executable(
   'mock_pool',
   sources: ['mock_pool.cpp'],
@@ -56,38 +47,49 @@ shared_mount = executable(
 
 test('shared_mount', shared_mount)
 
-api_lifecycle = executable(
-  'api_lifecycle',
-  sources: ['api_lifecycle.cpp'],
-  include_directories: inc,
-  dependencies: [
-    ssu_api_dep,
-  ],
-)
+if get_option('vendor') == 'mock'
+  api_gating = executable(
+    'api_gating',
+    sources: ['api_gating.cpp'],
+    include_directories: inc,
+    dependencies: [ssu_api_dep],
+  )
 
-test('api_lifecycle', api_lifecycle)
+  test('api_gating', api_gating)
 
-api_extent_buffer = executable(
-  'api_extent_buffer',
-  sources: ['api_extent_buffer.cpp'],
-  include_directories: inc,
-  dependencies: [
-    ssu_api_dep,
-  ],
-)
+  api_lifecycle = executable(
+    'api_lifecycle',
+    sources: ['api_lifecycle.cpp'],
+    include_directories: inc,
+    dependencies: [
+      ssu_api_dep,
+    ],
+  )
 
-test('api_extent_buffer', api_extent_buffer)
+  test('api_lifecycle', api_lifecycle)
 
-api_logical = executable(
-  'api_logical',
-  sources: ['api_logical.cpp'],
-  include_directories: inc,
-  dependencies: [
-    ssu_api_dep,
-  ],
-)
+  api_extent_buffer = executable(
+    'api_extent_buffer',
+    sources: ['api_extent_buffer.cpp'],
+    include_directories: inc,
+    dependencies: [
+      ssu_api_dep,
+    ],
+  )
 
-test('api_logical', api_logical)
+  test('api_extent_buffer', api_extent_buffer)
+
+  api_logical = executable(
+    'api_logical',
+    sources: ['api_logical.cpp'],
+    include_directories: inc,
+    dependencies: [
+      ssu_api_dep,
+    ],
+  )
+
+  test('api_logical', api_logical)
+endif
 
 dataplane_mock = executable(
   'dataplane_mock',

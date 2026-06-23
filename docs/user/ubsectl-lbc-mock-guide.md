@@ -31,7 +31,7 @@
 
 ## 最快验证路径
 
-控制面 create/attach 只需要准备一个环境变量：`LBC_PREFIX`。如果要执行 `mount` 并对 `/dev/ssuN` 做数据面验证，还需要先加载 ReqShim 内核模块，让 `/dev/ssu-ctl` 存在。
+控制面 create/attach 只需要准备一个环境变量：`LBC_PREFIX`。它只表示 LBC mock 软件所在目录，用来找到 `mock/setup_mock_target.sh`、`mock/run_mock.sh` 和 sample 程序，不放 UBSE 自己的配置文件。如果要执行 `mount` 并对 `/dev/ssuN` 做数据面验证，还需要先加载 ReqShim 内核模块，让 `/dev/ssu-ctl` 存在。
 
 ```bash
 export LBC_PREFIX=/path/to/lbc/mock/prefix
@@ -564,7 +564,21 @@ log_file=/tmp/ubse-lbc-mock.log
 ssu_count=3
 ```
 
-如果确实需要改，比如测试时想把 `/dev` 和 configfs 指到临时目录，可以在 `$LBC_PREFIX/mock/ssu_lbc_mock.conf` 写：
+如果确实需要改，比如测试时想把 `/dev` 和 configfs 指到临时目录，可以写 UBSE 自己的配置文件。默认路径是：
+
+```text
+/etc/ubse/ssu_lbc_mock.conf
+```
+
+临时测试也可以用 `SSU_LBC_MOCK_CONFIG` 指到任意路径：
+
+```bash
+sudo env LBC_PREFIX="$LBC_PREFIX" \
+    SSU_LBC_MOCK_CONFIG=/tmp/ssu_lbc_mock.conf \
+    ./build-lbc/src/user/runtime/ssu-mgr --role=manager
+```
+
+配置内容示例：
 
 ```ini
 dev_ip=127.0.0.1
@@ -576,7 +590,7 @@ log_file=/tmp/ubse-lbc-mock.log
 ssu_count=3
 ```
 
-这份配置只属于 LBC mock SSU Plugin，不是整个 SSU Manager 的全局配置。
+这份配置只属于 LBC mock SSU Plugin，不是整个 SSU Manager 的全局配置，也不属于 LBC mock 软件目录。不要把它放到 `$LBC_PREFIX` 下。
 
 ## 你不需要做的事
 

@@ -24,6 +24,7 @@
 #define LBC_MOCK_TOTAL_BYTES (LBC_MOCK_NSZE * LBC_MOCK_SECTOR_SIZE)
 #define LBC_MOCK_SUBNQN_MAX 31U
 #define LBC_MOCK_DEFAULT_SSU_COUNT 3U
+#define LBC_MOCK_DEFAULT_CONFIG_PATH "/etc/ubse/ssu_lbc_mock.conf"
 
 typedef struct {
     char prefix[256];
@@ -262,6 +263,7 @@ static void load_config_file(const char *path)
 static void ensure_config_loaded(void)
 {
     char config_path[512];
+    const char *config_env;
     const char *prefix_env;
 
     if (config_loaded) {
@@ -274,16 +276,17 @@ static void ensure_config_loaded(void)
         copy_cstr(lbc_config.prefix, sizeof(lbc_config.prefix), prefix_env);
     }
 
-    if (!checked_join(config_path, sizeof(config_path), lbc_config.prefix,
-                      "mock/ssu_lbc_mock.conf")) {
-        lbc_mock_log("invalid prefix while loading config: prefix=%s",
-                     lbc_config.prefix);
-        return;
+    config_env = getenv("SSU_LBC_MOCK_CONFIG");
+    if (!is_empty_string(config_env)) {
+        copy_cstr(config_path, sizeof(config_path), config_env);
+    } else {
+        copy_cstr(config_path, sizeof(config_path),
+                  LBC_MOCK_DEFAULT_CONFIG_PATH);
     }
 
     load_config_file(config_path);
-    lbc_mock_log("config prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u ssu_count=%u log_file=%s",
-                 lbc_config.prefix, lbc_config.dev_dir,
+    lbc_mock_log("config path=%s prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u ssu_count=%u log_file=%s",
+                 config_path, lbc_config.prefix, lbc_config.dev_dir,
                  lbc_config.configfs_dir, lbc_config.subnqn,
                  (unsigned int)lbc_config.port,
                  (unsigned int)lbc_config.resource_count,

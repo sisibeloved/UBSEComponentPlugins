@@ -160,6 +160,7 @@ $RECYCLE.BIN/
 
 
 # ---------- 运行期 / 本地配置 / 临时 ----------
+.codegraph/
 *.tmp
 *.temp
 *.log

@@ -1,9 +1,11 @@
-check = find_program('check.sh')
+if get_option('vendor') == 'mock'
+  check = find_program('check.sh')
 
-test(
-  'mvp5_check',
-  check,
-  args: [meson.project_build_root(), meson.project_source_root()],
-  depends: [ubsectl, ssu_mgr],
-  timeout: 20,
-)
+  test(
+    'mvp5_check',
+    check,
+    args: [meson.project_build_root(), meson.project_source_root()],
+    depends: [ubsectl, ssu_mgr],
+    timeout: 20,
+  )
+endif
