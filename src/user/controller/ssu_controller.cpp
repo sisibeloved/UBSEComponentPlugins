@@ -666,7 +666,7 @@ ssu_err_t ssu_controller_unmount(const ssu_plugin_ops_t *plugin,
 
     logdev = find_logdev_by_dev(logical_dev);
     if (logdev == NULL) {
-        return SSU_ERR_NOT_FOUND;
+        return plugin->unmount(logical_dev);
     }
 
     copy_cstr(allocate_id, sizeof(allocate_id), logdev->info.allocate_id);

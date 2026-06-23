@@ -35,6 +35,17 @@ control_multiphys = executable(
 
 test('control_multiphys', control_multiphys)
 
+control_stale_logdev = executable(
+  'control_stale_logdev',
+  sources: ['control_stale_logdev.cpp'],
+  include_directories: inc,
+  dependencies: [
+    ssu_controller_dep,
+  ],
+)
+
+test('control_stale_logdev', control_stale_logdev)
+
 shared_mount = executable(
   'shared_mount',
   sources: ['shared_mount.cpp'],

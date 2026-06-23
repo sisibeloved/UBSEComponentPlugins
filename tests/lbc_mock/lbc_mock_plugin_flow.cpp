@@ -316,6 +316,11 @@ static int run_plugin_flow(const char *prefix, const char *dev_dir,
         return 1;
     }
 
+    if (expect_err("stale unmount", plugin->unmount("/dev/ssu7"),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
     if (expect_err("delete ns",
                    plugin->delete_ns(resources[0].ssu_id, ns_id),
                    SSU_OK) != 0) {

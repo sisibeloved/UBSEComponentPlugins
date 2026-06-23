@@ -506,6 +506,7 @@ hint: lbc_mock create/attach finished, but no new /dev/nvmeXnY namespace was fou
 | `SSU_ERR_UNSUPPORTED (-9)` | 用了 `--no-aggregate`，或请求了未启用能力 | 快速验证保持默认聚合；未启用能力不要当成功路径 |
 | `SSU_ERR_NOT_FOUND (-3)` | request_id / 设备路径 / namespace 找不到 | 检查 `$RID`、`$DEV` 是否取对；`query --type logdev` |
 | `mount/free` 参数错 | 脚本把 `allocate-result-get` 的多行输出整体当设备路径 | 用 `sed -n '1p'` 只取第一行 |
+| manager 重启后 `/dev/ssuN` 还在 | 用户态状态丢了，但 ReqShim 内核模块里还有旧逻辑盘 | 先执行 `sudo ./build-lbc/tools/ubsectl unmount --dev /dev/ssuN` 清理 ReqShim 残留，再重新申请/挂载 |
 | 多物理盘 fio 只有一张盘有 I/O | `query --type logdev` 只有一行，或 fio 只访问了第一段逻辑区间 | 先确认 `logdev entries: 3`；fio 用 `blockdev --getsize64 "$DEV"` 覆盖整块逻辑盘 |
 
 查日志：
@@ -521,6 +522,15 @@ sudo tail -n 50 /tmp/ubse-lbc-mock.log      # LBC mock 插件日志
 
 **能不能不启动 `ssu-mgr`，直接跑 `ubsectl`？**
 不建议。单条 `list` 可能能看到资源，但完整生命周期不行——每条 `ubsectl` 都是短进程，不连 `ssu-mgr` 时状态不保留。`allocate → mount → free` 必须走常驻 `ssu-mgr`。
+
+**`ssu-mgr` 重启后旧的 `/dev/ssu0` 还在怎么办？**
+先清理逻辑块设备：
+
+```bash
+sudo ./build-lbc/tools/ubsectl unmount --dev /dev/ssu0
+```
+
+这会按 `/dev/ssu0` 的 minor 清理 ReqShim 里的残留逻辑盘，即使新的 `ssu-mgr` 进程已经没有旧的用户态挂载记录。注意：本系统当前不持久化 manager 内存状态，重启后旧 request_id/free 状态不会自动恢复；要重新使用请重新 `allocate → allocate-result-get → mount`。
 
 **为什么需要 sudo？**
 LBC mock 要操作 configfs 和 `/dev/nvme*`；`ssu-mgr` 建的通信通道默认同用户访问。最简单：`ssu-mgr` 和 `ubsectl` 都用 root。

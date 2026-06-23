@@ -1068,9 +1068,20 @@ static ssu_err_t lbc_mock_unmount(const char *logical_dev)
     lbc_mock_log("unmount start logical_dev=%s", logical_dev);
     mount = find_mount(logical_dev);
     if (mount == NULL) {
-        lbc_mock_log("unmount failed: logical device not found logical_dev=%s",
+        lbc_mock_log("unmount local state missing, try stale ReqShim cleanup logical_dev=%s",
                      logical_dev);
-        return SSU_ERR_NOT_FOUND;
+        err = ssu_reqshim_unmount_logdev(logical_dev, NULL, 0,
+                                         lbc_mock_reqshim_allow_missing(),
+                                         lbc_mock_reqshim_log, NULL,
+                                         NULL, NULL);
+        if (err != SSU_OK) {
+            lbc_mock_log("stale ReqShim cleanup failed logical_dev=%s err=%d",
+                         logical_dev, err);
+            return err;
+        }
+        lbc_mock_log("stale ReqShim cleanup success logical_dev=%s",
+                     logical_dev);
+        return SSU_OK;
     }
 
     memset(maps, 0, sizeof(maps));

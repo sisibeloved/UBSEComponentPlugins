@@ -593,7 +593,8 @@ static ssu_err_t mock_unmount(const char *logical_dev)
 
     mount = find_mount(logical_dev);
     if (mount == NULL) {
-        return SSU_ERR_NOT_FOUND;
+        return ssu_reqshim_unmount_logdev(logical_dev, NULL, 0, 1,
+                                          NULL, NULL, NULL, NULL);
     }
 
     memset(maps, 0, sizeof(maps));

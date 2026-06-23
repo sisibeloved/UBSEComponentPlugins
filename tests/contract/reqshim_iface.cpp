@@ -210,6 +210,35 @@ static int run_unmount_builds_expected_ioctls(void)
     return failed;
 }
 
+static int run_unmount_without_maps_destroys_logdev(void)
+{
+    const ssu_reqshim_sys_ops_t ops = {
+        fake_open,
+        fake_ioctl,
+        fake_close,
+    };
+    int failed = 0;
+
+    reset_fake();
+    failed |= expect_err("stale unmount",
+                         ssu_reqshim_unmount_logdev("/dev/ssu9", NULL, 0, 0,
+                                                    fake_log, NULL, &ops,
+                                                    "/tmp/ssu-ctl"),
+                         SSU_OK);
+    failed |= fake.open_count != 1 || fake.close_count != 1;
+    failed |= fake.call_count != 2;
+    failed |= expect_request(0, SSU_IOC_GET_VERSION);
+    failed |= expect_request(1, SSU_IOC_LOGDEV_DESTROY);
+
+    if (fake.calls[1].logdev.minor != 9) {
+        fputs("stale unmount should destroy the requested logical minor\n",
+              stderr);
+        failed = 1;
+    }
+
+    return failed;
+}
+
 static int run_missing_ctl_policy(void)
 {
     const ssu_reqshim_sys_ops_t ops = {
@@ -272,6 +301,7 @@ int main(void)
     failed |= run_minor_parser();
     failed |= run_mount_builds_expected_ioctls();
     failed |= run_unmount_builds_expected_ioctls();
+    failed |= run_unmount_without_maps_destroys_logdev();
     failed |= run_missing_ctl_policy();
 
     return failed == 0 ? 0 : 1;
