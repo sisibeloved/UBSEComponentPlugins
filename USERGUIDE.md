@@ -34,6 +34,31 @@
 | LBC mock 后端 | 模拟 SSU 硬件的脚本套件，放在某个目录（下文记作 `$LBC_PREFIX`） |
 | 内核头（可选） | 若要真正读写 `/dev/ssuN`，需要构建并加载 `ssu_reqshim.ko` 内核模块 |
 
+`$LBC_PREFIX` 至少要包含这些文件：
+
+```text
+$LBC_PREFIX/
+├── mock/
+│   ├── setup_mock_target.sh
+│   └── run_mock.sh
+├── sample_create_attach
+└── sample_detach_delete
+```
+
+本组件会自己调用这些脚本。集成方平时只调用 `ubsectl` 或 SDK，不直接调 LBC mock 脚本。
+
+先做一次前置检查，避免把旧测试目录或空目录当成 LBC mock：
+
+```bash
+test -x "$LBC_PREFIX/mock/setup_mock_target.sh"
+test -x "$LBC_PREFIX/mock/run_mock.sh"
+test -e "$LBC_PREFIX/sample_create_attach"
+test -e "$LBC_PREFIX/sample_detach_delete"
+```
+
+> 只在 `/tmp/ssu-lbc-mock-test-*` 下面找到的 prefix 通常是 Meson 测试生成的假目录，只适合自动化测试，不适合真实 `/dev` 数据面验证。
+> blue-98 当前也是这种情况：机器上只发现了自动测试留下的 `/tmp/ssu-lbc-mock-test-*` 目录，没有发现可用于真实 `/dev` 验证的 LBC mock 部署。要按本手册跑真实数据面，需要先把 LBC mock 后端部署到固定目录，然后把 `LBC_PREFIX` 指到那里。
+
 ### 2.2 构建
 
 ```bash
@@ -44,7 +69,7 @@ export LBC_PREFIX=/path/to/lbc/mock/prefix
 meson setup build-lbc -Dvendor=lbc_mock
 meson compile -C build-lbc
 
-# 内核模块（可选；想做真实数据面读写时需要）
+# 内核模块（真实 /dev 环境下执行 mount 和数据面读写时需要）
 meson setup build-lbc-kernel \
     -Dvendor=lbc_mock \
     -Dbuild_kernel=enabled \
@@ -55,6 +80,27 @@ ls -l /dev/ssu-ctl        # 看到这个控制设备 = 模块加载成功
 ```
 
 > 不加载 ReqShim 也能做控制面验收（allocate/list/allocate-result-get/free 都能跑）；只有 `mount`（建 `/dev/ssuN`）和真正的数据读写需要它。ReqShim 没加载时 `mount` 会明确报 `SSU_ERR_KERNEL (-6)`。
+
+数据面验证如果要用 `fio` 和 `iostat`，还需要这两个工具：
+
+```bash
+command -v fio
+command -v iostat
+```
+
+在 openEuler 上通常来自 `fio` 和 `sysstat` 包；如果机器不允许安装，也可以只用后面的 `dd + cmp + blockdev` 做基础验证。
+
+blue-98 当前默认环境未安装 `fio` 和 `iostat`。如果不能安装软件包，就跳过文档里的 fio 压测和 iostat 观察，先用 `dd + cmp + blockdev` 验证基本读写和容量。
+
+blue-98 上已经用 openEuler 24.03 LTS-SP3 的 6.6 aarch64 内核验证过模块能编译出来：
+
+```text
+$ uname -r
+6.6.0-132.0.0.111.oe2403sp3.aarch64
+
+$ modinfo build-lbc-kernel/src/kernel/reqshim/ssu_reqshim.ko | grep vermagic
+vermagic:       6.6.0-132.0.0.111.oe2403sp3.aarch64 SMP mod_unload modversions aarch64
+```
 
 构建后你会用到两个可执行程序：
 
@@ -85,8 +131,10 @@ sudo ./build-lbc/tools/ubsectl list
 看到类似输出就说明通了（LBC mock 默认发现 3 个 mock SSU）：
 
 ```
-pool entries: 1
+pool entries: 3
 lbc-mock-ssu0 lbc-mock-host0 ONLINE 0/536870912
+lbc-mock-ssu1 lbc-mock-host1 ONLINE 0/536870912
+lbc-mock-ssu2 lbc-mock-host2 ONLINE 0/536870912
 ```
 
 ---
@@ -113,7 +161,7 @@ sudo ./build-lbc/tools/ubsectl allocate \
 - `--physical-disks N`：可选，手动指定用几张物理盘；不传=默认单盘。
 - `--out FILE`：把 `request_id` 写入文件，方便脚本取用。
 
-`allocate` 是**异步**的——它立刻返回一个 `request_id`，底层正在 create+attach。
+`allocate` 是**异步**的——它立刻返回一个 `request_id`，底层正在 create+attach。上面的命令会同时在屏幕上打印类似 `alloc-0`，并把同样的内容写入 `/tmp/ssu-rid`。
 
 ### 第 2 步：取分配结果（拿到逻辑设备路径）
 
@@ -133,7 +181,7 @@ physical 0 lbc-mock-ssu0 1 0 536870912 lba=0
 
 `physical` 行字段：序号、SSU ID、namespace ID、逻辑偏移、长度、物理起始 LBA。
 
-> ⚠️ 脚本里**只取第一行**当作 `$DEV`，别把整段输出当设备路径。
+> 脚本里**只取第一行**当作 `$DEV`，别把整段输出当设备路径。
 
 ### 第 3 步：挂载成逻辑块设备
 
@@ -144,33 +192,75 @@ sudo ./build-lbc/tools/ubsectl mount --dev "$DEV" --host local
 这一步把物理 namespace 挂成 `/dev/ssuN`，并向 ReqShim 下发映射。成功后：
 
 ```bash
-ls /dev/ssu*                                    # 看到 /dev/ssu0
+ls /dev/ssu*                                    # 看到 /dev/ssuN
 sudo ./build-lbc/tools/ubsectl query --type logdev
 ```
 
-`query --type logdev` 输出（`/dev/ssuN → /dev/nvmeXnY` 的映射）：
+`query --type logdev` 输出（`/dev/ssuN → /dev/nvmeXnY` 的映射，真实设备名以本机输出为准）：
 
 ```
 logdev entries: 1
-/dev/ssu0 local alloc-0 0 536870912 /dev/nvme1n1 1 0
+/dev/ssu0 local alloc-0 0 536870912 /dev/nvmeXnY 1 0
 ```
+
+真实 `/dev` 环境下，`mount` 成功还应能看到系统块设备：
+
+```bash
+PHYS_DEV=$(sudo ./build-lbc/tools/ubsectl query --type logdev |
+    awk -v dev="$DEV" '$1 == dev { print $6; exit }')
+
+ls /dev/ssu*
+lsblk "$DEV"
+lsblk "$PHYS_DEV"
+blockdev --getsz "$PHYS_DEV"   # 1048576，表示 512 MiB
+```
+
+不要把 `/dev/nvme1n1` 写死。很多机器上它可能是已有系统盘或业务盘；实际物理设备名必须以 `query --type logdev` 输出为准。
+
+blue-98 实测 `/dev/nvme1n1`、`/dev/nvme2n1`、`/dev/nvme3n1` 都是已有 3.6T 磁盘，其中 `/dev/nvme3n1` 挂着系统分区。不要直接对这些名字照抄 `dd`/`fio`。
+
+Meson 验收测试为了不污染真实 `/dev`，会把 `dev_dir` 指到临时目录。这种测试模式会跳过 `/dev/ssu-ctl`，所以日志里可能看到：
+
+```text
+lbc_mock: ReqShim control device unavailable, skip ioctl path ctl=/dev/ssu-ctl errno=2
+```
+
+这不是给真实集成使用的模式。真实集成保持默认 `dev_dir=/dev` 时，`mount` 必须加载 ReqShim。
 
 ### 第 4 步：读写数据（标准块设备操作）
 
-`/dev/ssu0` 就是一个普通块设备，任何 `open`/`read`/`write` 程序都能用：
+`$DEV` 指向的 `/dev/ssuN` 就是一个普通块设备，任何 `open`/`read`/`write` 程序都能用。下面命令会覆盖测试盘上的前 4 MiB 数据，只能对测试设备执行：
 
 ```bash
 # 简单验证：写一段随机数据再读回比对
 sudo dd if=/dev/urandom of=/tmp/data.bin bs=1M count=4
-sudo dd if=/tmp/data.bin of=/dev/ssu0 bs=1M count=4 oflag=direct
-sudo dd if=/dev/ssu0 of=/tmp/out.bin bs=1M count=4 iflag=direct
-cmp /tmp/data.bin /tmp/out.bin && echo "数据一致 ✅"
+sudo dd if=/tmp/data.bin of="$DEV" bs=1M count=4 oflag=direct
+sudo dd if="$DEV" of=/tmp/out.bin bs=1M count=4 iflag=direct
+cmp /tmp/data.bin /tmp/out.bin && echo "data verified"
 ```
 
 或用自带的 `ssu_smoke`（一条命令跑完写+读+比对）：
 
 ```bash
-sudo ./build-lbc/tests/stubs/ubs_io/ssu_smoke /dev/ssu0 --bytes 65536
+sudo ./build-lbc/tests/stubs/ubs_io/ssu_smoke "$DEV" --bytes 65536
+```
+
+如果机器上装了 `fio`，更适合做压力一点的黑盒验证。注意：这里的 `--size` 是 fio 的工作集大小，如果只写 `--size=256M`，fio 默认只会访问从逻辑 offset 0 开始的 256 MiB 区间。
+
+```bash
+DEV_BYTES=$(sudo blockdev --getsize64 "$DEV")
+
+sudo fio \
+    --name=ssu-dataplane \
+    --filename="$DEV" \
+    --rw=randrw \
+    --bs=4k \
+    --iodepth=16 \
+    --direct=1 \
+    --size="$DEV_BYTES" \
+    --verify=crc32c \
+    --do_verify=1 \
+    --verify_fatal=1
 ```
 
 ### 第 5 步：解挂载 / 释放（二选一，语义不同）
@@ -252,8 +342,16 @@ int main()
 编译：
 
 ```bash
-g++ my_app.cpp -o my_app -lssu_api
+g++ my_app.cpp -o my_app \
+    -I./include \
+    -L./build-lbc/src/user/api \
+    -lssu_api
+
+LD_LIBRARY_PATH=./build-lbc/src/user/api:./build-lbc/src/user/controller:./build-lbc/src/user/scheduler:./build-lbc/src/user/plugin/vendors/lbc_mock \
+    ./my_app
 ```
+
+如果已经把库安装到系统路径，可以按你的安装路径调整 `-I`、`-L` 和 `LD_LIBRARY_PATH`。
 
 ### SDK 函数速查
 
@@ -272,14 +370,68 @@ g++ my_app.cpp -o my_app -lssu_api
 
 ## 5. 多物理盘与共享
 
-**多物理盘**（条带/多分片）：
+**多物理盘**（连续区间聚合）：
 
 ```bash
-sudo ./build-lbc/tools/ubsectl allocate --size 12288 --physical-disks 3 \
-    --user user-demo --host local --out /tmp/ssu-rid
+sudo ./build-lbc/tools/ubsectl allocate --size 768M --physical-disks 3 \
+    --user user-demo --share exclusive --host local --out /tmp/ssu-rid
 ```
 
-成功后 `allocate-result-get` 返回多条 `physical` 行；`mount` 后 `query --type logdev` 也看到同一 `/dev/ssuN` 对应多条物理映射。
+这条命令用 3 张物理盘拼出一个 768 MiB 的逻辑盘，每张物理盘分到连续的 256 MiB 逻辑区间。输出形态如下：
+
+```text
+/dev/ssu1
+physical 0 lbc-mock-ssu0 1 0 268435456 lba=0
+physical 1 lbc-mock-ssu1 2 268435456 268435456 lba=0
+physical 2 lbc-mock-ssu2 3 536870912 268435456 lba=0
+```
+
+挂载后，`query --type logdev` 会看到同一个 `/dev/ssu1` 对应 3 条物理映射：
+
+```text
+logdev entries: 3
+/dev/ssu1 local alloc-1 0 268435456 /dev/nvmeXnY 1 0
+/dev/ssu1 local alloc-1 268435456 268435456 /dev/nvmeXnZ 2 0
+/dev/ssu1 local alloc-1 536870912 268435456 /dev/nvmeXnW 3 0
+```
+
+这里的 `/dev/nvmeXnY` 只是占位写法，实际名称以本机输出为准。
+
+当前 MVP 的多物理盘不是 4 KiB 轮询 RAID0 条带，而是“逻辑盘按连续区间切成多段”。所以如果 fio 只访问前 256 MiB，只会命中第一张物理盘。要观察 3 张盘都有 I/O，需要让 fio 覆盖整块逻辑盘：
+
+```bash
+PHYS=$(sudo ./build-lbc/tools/ubsectl query --type logdev |
+    awk -v dev="$DEV" '$1 == dev { sub("/dev/", "", $6); print $6 }')
+
+# 先在一个终端观察底层盘；没有 iostat 时，退回容量检查
+if command -v iostat >/dev/null 2>&1; then
+    iostat -dx 1 $PHYS
+else
+    for p in $PHYS; do
+        echo "$p $(sudo blockdev --getsize64 /dev/$p)"
+    done
+fi
+
+# 再在另一个终端跑覆盖整块逻辑盘的 fio
+DEV_BYTES=$(sudo blockdev --getsize64 "$DEV")
+sudo fio \
+    --name=ssu-multiphy \
+    --filename="$DEV" \
+    --rw=randrw \
+    --bs=4k \
+    --iodepth=16 \
+    --direct=1 \
+    --time_based \
+    --runtime=30 \
+    --randrepeat=0 \
+    --norandommap=1 \
+    --size="$DEV_BYTES" \
+    --verify=crc32c \
+    --do_verify=1 \
+    --verify_fatal=1
+```
+
+也可以按 `query --type logdev` 的逻辑偏移和物理 LBA，分别从 `$DEV` 与输出里的各个物理设备读取同一段数据再 `cmp`。这个方法能证明逻辑区间确实映射到了指定物理盘。
 
 **共享盘**（多 host 共用同一 namespace）：
 
@@ -309,6 +461,7 @@ hint: lbc_mock create/attach finished, but no new /dev/nvmeXnY namespace was fou
 | `SSU_ERR_UNSUPPORTED (-9)` | 用了 `--no-aggregate`，或请求了未启用能力 | 快速验证保持默认聚合；未启用能力不要当成功路径 |
 | `SSU_ERR_NOT_FOUND (-3)` | request_id / 设备路径 / namespace 找不到 | 检查 `$RID`、`$DEV` 是否取对；`query --type logdev` |
 | `mount/free` 参数错 | 脚本把 `allocate-result-get` 的多行输出整体当设备路径 | 用 `sed -n '1p'` 只取第一行 |
+| 多物理盘 fio 只有一张盘有 I/O | `query --type logdev` 只有一行，或 fio 只访问了第一段逻辑区间 | 先确认 `logdev entries: 3`；fio 用 `blockdev --getsize64 "$DEV"` 覆盖整块逻辑盘 |
 
 查日志：
 
@@ -327,8 +480,19 @@ sudo tail -n 50 /tmp/ubse-lbc-mock.log      # LBC mock 插件日志
 **为什么需要 sudo？**
 LBC mock 要操作 configfs 和 `/dev/nvme*`；`ssu-mgr` 建的通信通道默认同用户访问。最简单：`ssu-mgr` 和 `ubsectl` 都用 root。
 
+**已经 `export LBC_PREFIX` 了，为什么启动 `ssu-mgr` 还要写 `sudo env LBC_PREFIX="$LBC_PREFIX"`？**
+因为 `sudo` 默认可能清理普通用户环境变量。前面的 `export` 是给当前 shell 用的；`sudo env LBC_PREFIX="$LBC_PREFIX"` 是明确把这个变量传进 root 启动的 `ssu-mgr`。如果你的 sudoers 已经保留 `LBC_PREFIX`，也可以不写这一段，但手册里保留它更稳。
+
 **为什么看不到 512M？**
-`sudo ./build-lbc/tools/ubsectl query --type logdev` 找到真实设备（如 `/dev/nvme1n1`），再 `cat /sys/class/block/nvme1n1/size`，应为 `1048576`（512 MiB，按 512B 扇区）。不对就看 LBC mock 日志。
+先用 `sudo ./build-lbc/tools/ubsectl query --type logdev` 找到真实物理设备，再查容量：
+
+```bash
+PHYS_DEV=$(sudo ./build-lbc/tools/ubsectl query --type logdev |
+    awk -v dev="$DEV" '$1 == dev { print $6; exit }')
+sudo blockdev --getsz "$PHYS_DEV"
+```
+
+512 MiB 对应输出 `1048576`（按 512B 扇区）。不对就看 LBC mock 日志。
 
 **`SSU_MGR_SOCKET` 是什么？**
 `ubsectl` 找 `ssu-mgr` 的本地通信入口。默认 `/tmp/ubse-ssu-mgr.fifo`（命名管道）。只有想换路径时才需要设它：
@@ -358,6 +522,8 @@ ssu_count=3
 
 > 这份配置**只属于 LBC mock 插件**，别放进 `$LBC_PREFIX`，也不是 Manager 全局配置。
 
+真实快速验证一般不用配置文件，只设置 `LBC_PREFIX`。只有需要把 `/dev`、configfs、日志路径等改成测试目录时，才设置 `SSU_LBC_MOCK_CONFIG`。`subnqn` 不能超过 31 个字符，默认值 `nqn.2025-01.io.ssu:m0` 已经满足限制。
+
 ---
 
 ## 8. 当前能力边界
@@ -365,7 +531,7 @@ ssu_count=3
 已经覆盖：
 
 - 控制面全闭环：`allocate`（create+attach）→ `allocate-result-get` → `mount`（建 `/dev/ssuN`）→ `unmount`/`free`。
-- 数据面 MVP：对 `/dev/ssuN` 的普通 `read/write`，经 ReqShim 映射到底层物理设备。
+- 数据面 MVP：对 `/dev/ssuN` 的普通 `read/write`，经 ReqShim 映射到底层物理设备。当前下发到底层设备走普通 block/bio 路径。
 
 尚未支持（请求这些会返回 `SSU_ERR_UNSUPPORTED`）：
 
@@ -373,4 +539,11 @@ ssu_count=3
 - `--no-aggregate`（非聚合模式）。
 - 多副本（REPLICA）、纠删码（EC）、NDS 近数据访问、多流（stream）。
 
-需要真实读写 `/dev/ssuN` 必须在有内核模块加载环境的 Linux 上验收；普通 Meson 测试用临时目录模拟，会跳过真实 `/dev/ssu-ctl`。
+需要真实读写 `/dev/ssuN` 必须在有内核模块加载环境的 Linux 上验收；普通 Meson 测试用临时目录模拟，会跳过真实 `/dev/ssu-ctl`。blue-98 上按本手册的构建目录跑过的自动验收结果是：
+
+```text
+build-lbc:                   Ok: 13, Fail: 0
+build-lbc-kernel:            Ok: 13, Fail: 0
+```
+
+其中 `build-lbc-kernel` 已验证 `.ko` 能在 6.6 aarch64 内核上构建并生成，`vermagic` 与当前内核一致，但没有在 blue-98 上自动执行 `insmod`；加载内核模块会影响运行内核，真实环境需要人工确认后再执行。
