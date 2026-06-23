@@ -29,10 +29,23 @@ static int expect_contains(const std::string &label,
     return 1;
 }
 
+static int expect_not_contains(const std::string &label,
+                               const std::string &text,
+                               const std::string &needle)
+{
+    if (text.find(needle) == std::string::npos) {
+        return 0;
+    }
+
+    std::cerr << label << " should not contain " << needle << "\n";
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     std::string root;
     std::string iface;
+    std::string ioctl;
     std::string mock;
     std::string lbc_mock;
     int failed = 0;
@@ -44,10 +57,11 @@ int main(int argc, char **argv)
 
     root = argv[1];
     iface = read_file(root + "/src/user/plugin/reqshim_iface.cpp");
+    ioctl = read_file(root + "/src/kernel/reqshim/reqshim_ioctl.c");
     mock = read_file(root + "/src/user/plugin/vendors/mock/ssu_plugin_mock.cpp");
     lbc_mock = read_file(root + "/src/user/plugin/vendors/lbc_mock/ssu_plugin_lbc_mock.cpp");
 
-    if (mock.empty() || lbc_mock.empty()) {
+    if (ioctl.empty() || mock.empty() || lbc_mock.empty()) {
         return 1;
     }
 
@@ -63,6 +77,10 @@ int main(int argc, char **argv)
                               "SSU_IOC_MAP_DEL");
     failed |= expect_contains("reqshim_iface", iface,
                               "SSU_IOC_LOGDEV_DESTROY");
+    failed |= expect_contains("reqshim_ioctl", ioctl,
+                              "#include <linux/uaccess.h>");
+    failed |= expect_not_contains("reqshim_ioctl", ioctl,
+                                  "#include <linux/copy_to_user.h>");
     failed |= expect_contains("mock plugin", mock,
                               "ssu_reqshim_mount_logdev");
     failed |= expect_contains("mock plugin", mock,

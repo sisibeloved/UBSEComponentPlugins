@@ -1,5 +1,5 @@
-#include <linux/copy_to_user.h>
 #include <linux/errno.h>
+#include <linux/uaccess.h>
 
 #include "reqshim_internal.h"
 
