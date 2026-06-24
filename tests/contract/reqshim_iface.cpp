@@ -278,7 +278,7 @@ static int run_missing_ctl_policy(void)
     return failed;
 }
 
-static int run_mount_creates_directory_alias(void)
+static int run_mount_has_no_filesystem_side_effects(void)
 {
     const ssu_reqshim_sys_ops_t ops = {
         fake_open,
@@ -289,8 +289,6 @@ static int run_mount_creates_directory_alias(void)
     char root[] = "/tmp/ssu-reqshim-alias-XXXXXX";
     char dir[128];
     char logical_dev[160];
-    char target[128];
-    ssize_t target_len;
     int failed = 0;
 
     if (mkdtemp(root) == NULL) {
@@ -306,37 +304,31 @@ static int run_mount_creates_directory_alias(void)
     map.length = 4096;
 
     reset_fake();
-    failed |= expect_err("mount alias",
+    failed |= expect_err("mount nested path",
                          ssu_reqshim_mount_logdev(logical_dev, &map, 1, 0,
                                                   fake_log, NULL, &ops,
                                                   "/tmp/ssu-ctl"),
                          SSU_OK);
 
-    memset(target, 0, sizeof(target));
-    target_len = readlink(logical_dev, target, sizeof(target) - 1);
-    if (target_len < 0) {
-        fputs("mount should create a logical device alias symlink\n", stderr);
-        failed = 1;
-    } else if (strcmp(target, "/dev/ssu4") != 0) {
-        fprintf(stderr, "alias target mismatch: %s\n", target);
+    if (access(dir, F_OK) == 0 || access(logical_dev, F_OK) == 0) {
+        fputs("user-space ReqShim iface must not create /dev/ssu aliases\n",
+              stderr);
         failed = 1;
     }
 
     reset_fake();
-    failed |= expect_err("unmount alias",
+    failed |= expect_err("unmount nested path",
                          ssu_reqshim_unmount_logdev(logical_dev, &map, 1, 0,
                                                     fake_log, NULL, &ops,
                                                     "/tmp/ssu-ctl"),
                          SSU_OK);
 
-    if (readlink(logical_dev, target, sizeof(target) - 1) >= 0) {
-        fputs("unmount should remove the logical device alias symlink\n",
+    if (access(dir, F_OK) == 0 || access(logical_dev, F_OK) == 0) {
+        fputs("user-space ReqShim iface must not remove kernel-owned aliases\n",
               stderr);
         failed = 1;
     }
 
-    unlink(logical_dev);
-    rmdir(dir);
     rmdir(root);
     return failed;
 }
@@ -378,7 +370,7 @@ int main(void)
     failed |= run_unmount_builds_expected_ioctls();
     failed |= run_unmount_without_maps_destroys_logdev();
     failed |= run_missing_ctl_policy();
-    failed |= run_mount_creates_directory_alias();
+    failed |= run_mount_has_no_filesystem_side_effects();
 
     return failed == 0 ? 0 : 1;
 }

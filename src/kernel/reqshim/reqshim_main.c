@@ -5,7 +5,7 @@
 
 #include "reqshim_internal.h"
 
-#define SSU_REQSHIM_DEVICE_NAME "ssu-ctl"
+#define SSU_REQSHIM_DEVICE_NAME "ssu/ctl"
 
 static const struct file_operations ssu_reqshim_fops = {
     .owner = THIS_MODULE,

@@ -10,7 +10,8 @@
 extern "C" {
 #endif
 
-#define SSU_REQSHIM_DEFAULT_CTL_PATH "/dev/ssu-ctl"
+#define SSU_REQSHIM_DEFAULT_CTL_PATH "/dev/ssu/ctl"
+#define SSU_REQSHIM_LEGACY_CTL_PATH "/dev/ssu-ctl"
 #define SSU_REQSHIM_SECTOR_SIZE 512ULL
 
 typedef struct {

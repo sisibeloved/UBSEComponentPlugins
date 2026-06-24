@@ -57,7 +57,6 @@ test -e "$LBC_PREFIX/sample_detach_delete"
 ```
 
 > 只在 `/tmp/ssu-lbc-mock-test-*` 下面找到的 prefix 通常是 Meson 测试生成的假目录，只适合自动化测试，不适合真实 `/dev` 数据面验证。
-> blue-98 当前也是这种情况：机器上只发现了自动测试留下的 `/tmp/ssu-lbc-mock-test-*` 目录，没有发现可用于真实 `/dev` 验证的 LBC mock 部署。要按本手册跑真实数据面，需要先把 LBC mock 后端部署到固定目录，然后把 `LBC_PREFIX` 指到那里。
 
 ### 2.2 构建
 
@@ -76,7 +75,7 @@ meson setup build-lbc-kernel \
     -Dkernel_src_dir=/lib/modules/$(uname -r)/build
 meson compile -C build-lbc-kernel
 sudo insmod build-lbc-kernel/src/kernel/reqshim/ssu_reqshim.ko
-ls -l /dev/ssu-ctl        # 看到这个控制设备 = 模块加载成功
+ls -l /dev/ssu/ctl        # 看到这个控制设备 = 模块加载成功
 ```
 
 > 不加载 ReqShim 也能做控制面验收（allocate/list/allocate-result-get/free 都能跑）；只有 `mount`（建 `/dev/ssu/ssuN`）和真正的数据读写需要它。ReqShim 没加载时 `mount` 会明确报 `SSU_ERR_KERNEL (-6)`。
@@ -89,18 +88,6 @@ command -v iostat
 ```
 
 在 openEuler 上通常来自 `fio` 和 `sysstat` 包；如果机器不允许安装，也可以只用后面的 `dd + cmp + blockdev` 做基础验证。
-
-blue-98 当前默认环境未安装 `fio` 和 `iostat`。如果不能安装软件包，就跳过文档里的 fio 压测和 iostat 观察，先用 `dd + cmp + blockdev` 验证基本读写和容量。
-
-blue-98 上已经用 openEuler 24.03 LTS-SP3 的 6.6 aarch64 内核验证过模块能编译出来：
-
-```text
-$ uname -r
-6.6.0-132.0.0.111.oe2403sp3.aarch64
-
-$ modinfo build-lbc-kernel/src/kernel/reqshim/ssu_reqshim.ko | grep vermagic
-vermagic:       6.6.0-132.0.0.111.oe2403sp3.aarch64 SMP mod_unload modversions aarch64
-```
 
 构建后你会用到两个可执行程序：
 
@@ -189,7 +176,7 @@ physical 0 lbc-mock-ssu0 1 0 536870912 lba=0
 sudo ./build-lbc/tools/ubsectl mount --dev "$DEV" --host local
 ```
 
-这一步把物理 namespace 挂成 `/dev/ssu/ssuN`，并向 ReqShim 下发映射。ReqShim 内核设备名仍是 `ssuN`，用户态会创建 `/dev/ssu/ssuN -> /dev/ssuN` 这个稳定入口。成功后：
+这一步把物理 namespace 挂成 `/dev/ssu/ssuN`，并向 ReqShim 下发映射。`/dev/ssu` 目录和其中的逻辑块设备入口由 ReqShim 内核模块通过 devtmpfs 暴露，不由用户态临时创建软链。成功后：
 
 ```bash
 ls /dev/ssu/ssu*                                # 看到 /dev/ssu/ssuN
@@ -217,15 +204,13 @@ blockdev --getsz "$PHYS_DEV"   # 1048576，表示 512 MiB
 
 不要把 `/dev/nvme1n1` 写死。很多机器上它可能是已有系统盘或业务盘；实际物理设备名必须以 `query --type logdev` 输出为准。
 
-blue-98 实测 `/dev/nvme1n1`、`/dev/nvme2n1`、`/dev/nvme3n1` 都是已有 3.6T 磁盘，其中 `/dev/nvme3n1` 挂着系统分区。不要直接对这些名字照抄 `dd`/`fio`。
-
-Meson 验收测试为了不污染真实 `/dev`，会把 `dev_dir` 指到临时目录。这种测试模式会跳过 `/dev/ssu-ctl`，所以日志里可能看到：
+Meson 验收测试为了不污染真实 `/dev`，会把 `dev_dir` 指到临时目录。这种测试模式会跳过 `/dev/ssu/ctl`，所以日志里可能看到：
 
 ```text
 lbc_mock: ReqShim control device unavailable, skip ioctl path ctl=/dev/ssu-ctl errno=2
 ```
 
-这不是给真实集成使用的模式。真实集成保持默认 `dev_dir=/dev` 时，`mount` 必须加载 ReqShim。
+这不是给真实集成使用的模式。真实集成保持默认 `dev_dir=/dev` 时，`mount` 必须加载 ReqShim。新版本默认控制设备是 `/dev/ssu/ctl`；日志里的 `/dev/ssu-ctl` 只表示兼容旧模块路径的 fallback 也没找到。
 
 ### 第 4 步：读写数据（标准块设备操作）
 
@@ -504,7 +489,7 @@ hint: lbc_mock create/attach finished, but no new /dev/nvmeXnY namespace was fou
 | 错误码 | 常见原因 | 处理 |
 | ---- | ---- | ---- |
 | `SSU_ERR_NO_RESOURCE` | `--physical-disks N` 超过可用盘数，或池里没 ONLINE 资源 | 先 `ubsectl list`（LBC mock 默认 3 个 SSU） |
-| `SSU_ERR_KERNEL (-6)` | `mount/unmount` 调 ReqShim 失败，通常 `/dev/ssu-ctl` 不存在 | `ls -l /dev/ssu-ctl`；不存在则 `insmod ssu_reqshim.ko` |
+| `SSU_ERR_KERNEL (-6)` | `mount/unmount` 调 ReqShim 失败，通常 `/dev/ssu/ctl` 不存在 | `ls -l /dev/ssu/ctl`；不存在则 `insmod ssu_reqshim.ko` |
 | `SSU_ERR_UNSUPPORTED (-9)` | 用了 `--no-aggregate`，或请求了未启用能力 | 快速验证保持默认聚合；未启用能力不要当成功路径 |
 | `SSU_ERR_NOT_FOUND (-3)` | request_id / 设备路径 / namespace 找不到 | 检查 `$RID`、`$DEV` 是否取对；`query --type logdev` |
 | `mount/free` 参数错 | 脚本把 `allocate-result-get` 的多行输出整体当设备路径 | 用 `sed -n '1p'` 只取第一行 |
@@ -596,11 +581,4 @@ ssu_count=3
 - `--no-aggregate`（非聚合模式）。
 - 多副本（REPLICA）、纠删码（EC）、NDS 近数据访问、多流（stream）。
 
-需要真实读写 `/dev/ssu/ssuN` 必须在有内核模块加载环境的 Linux 上验收；普通 Meson 测试用临时目录模拟，会跳过真实 `/dev/ssu-ctl`。当前用户态自动验收结果是：
-
-```text
-build:                       Ok: 23, Fail: 0
-build-lbc:                   Ok: 14, Fail: 0
-```
-
-内核模块仍需在目标内核上单独执行 `meson compile -C build-lbc-kernel` 并人工确认后再 `insmod`；加载内核模块会影响运行内核，真实环境需要人工确认后再执行。
+需要真实读写 `/dev/ssu/ssuN` 必须在有内核模块加载环境的 Linux 上验收；普通 Meson 测试用临时目录模拟，会跳过真实 `/dev/ssu/ctl`。加载内核模块会影响运行内核，正式环境需要人工确认窗口。

@@ -228,7 +228,7 @@ int main(void)
 
     failed |= expect_contains(text, "mount failed: SSU_ERR_KERNEL (-6)");
     failed |= expect_contains(text, "plugin: lbc_mock");
-    failed |= expect_contains(text, "/dev/ssu-ctl");
+    failed |= expect_contains(text, "/dev/ssu/ctl");
     failed |= expect_contains(text, "ssu_reqshim.ko");
     failed |= expect_contains(text, "/tmp/ubse-lbc-mock.log");
 

@@ -46,6 +46,7 @@ int main(int argc, char **argv)
     std::string root;
     std::string iface;
     std::string ioctl;
+    std::string main;
     std::string mock;
     std::string lbc_mock;
     int failed = 0;
@@ -58,17 +59,21 @@ int main(int argc, char **argv)
     root = argv[1];
     iface = read_file(root + "/src/user/plugin/reqshim_iface.cpp");
     ioctl = read_file(root + "/src/kernel/reqshim/reqshim_ioctl.c");
+    main = read_file(root + "/src/kernel/reqshim/reqshim_main.c");
     mock = read_file(root + "/src/user/plugin/vendors/mock/ssu_plugin_mock.cpp");
     lbc_mock = read_file(root + "/src/user/plugin/vendors/lbc_mock/ssu_plugin_lbc_mock.cpp");
 
-    if (ioctl.empty() || mock.empty() || lbc_mock.empty()) {
+    if (ioctl.empty() || main.empty() || mock.empty() || lbc_mock.empty()) {
         return 1;
     }
 
     failed |= expect_contains("reqshim_iface", iface,
                               "SSU_REQSHIM_DEFAULT_CTL_PATH");
     failed |= expect_contains("reqshim_iface", iface,
+                              "SSU_REQSHIM_LEGACY_CTL_PATH");
+    failed |= expect_contains("reqshim_iface", iface,
                               "SSU_IOC_GET_VERSION");
+    failed |= expect_contains("reqshim_main", main, "ssu/ctl");
     failed |= expect_contains("reqshim_iface", iface,
                               "SSU_IOC_LOGDEV_CREATE");
     failed |= expect_contains("reqshim_iface", iface,

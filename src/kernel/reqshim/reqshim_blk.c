@@ -239,7 +239,7 @@ int ssu_reqshim_logdev_create(const struct ssu_logdev_req *req)
     disk->minors = 1;
     disk->fops = &ssu_reqshim_bdev_ops;
     disk->private_data = slot;
-    snprintf(disk->disk_name, DISK_NAME_LEN, "ssu%u", req->minor);
+    snprintf(disk->disk_name, DISK_NAME_LEN, "ssu/ssu%u", req->minor);
     blk_queue_logical_block_size(disk->queue, req->logical_block_size);
     set_capacity(disk, req->capacity_sectors);
 
