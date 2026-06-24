@@ -13,6 +13,8 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
+#include <filesystem>
+#include <system_error>
 #include <vector>
 
 static int default_open_ctl(const char *path, int flags)
@@ -127,8 +129,8 @@ static int parse_uint_tail(const char *s, uint32_t *out)
 ssu_err_t ssu_reqshim_parse_logical_minor(const char *logical_dev,
                                           uint32_t *out_minor)
 {
-    const char *prefix = "/dev/ssu";
-    const char *short_prefix = "ssu";
+    const char *prefix = "ssu";
+    const char *base;
     const char *digits;
     char *end = NULL;
     unsigned long value;
@@ -137,13 +139,12 @@ ssu_err_t ssu_reqshim_parse_logical_minor(const char *logical_dev,
         return SSU_ERR_INVALID;
     }
 
-    if (strncmp(logical_dev, prefix, strlen(prefix)) == 0) {
-        digits = logical_dev + strlen(prefix);
-    } else if (strncmp(logical_dev, short_prefix, strlen(short_prefix)) == 0) {
-        digits = logical_dev + strlen(short_prefix);
-    } else {
+    base = strrchr(logical_dev, '/');
+    base = base == NULL ? logical_dev : base + 1;
+    if (strncmp(base, prefix, strlen(prefix)) != 0) {
         return SSU_ERR_INVALID;
     }
+    digits = base + strlen(prefix);
 
     if (*digits == '\0') {
         return SSU_ERR_INVALID;
@@ -158,6 +159,99 @@ ssu_err_t ssu_reqshim_parse_logical_minor(const char *logical_dev,
 
     *out_minor = (uint32_t)value;
     return SSU_OK;
+}
+
+static void canonical_logical_dev(uint32_t minor, char *out, size_t n)
+{
+    snprintf(out, n, "/dev/ssu%u", minor);
+}
+
+static int logical_dev_needs_alias(const char *logical_dev, uint32_t minor)
+{
+    char canonical[64];
+
+    if (strchr(logical_dev, '/') == NULL) {
+        return 0;
+    }
+
+    canonical_logical_dev(minor, canonical, sizeof(canonical));
+    return strcmp(logical_dev, canonical) != 0;
+}
+
+static ssu_err_t ensure_logical_dev_alias(
+    const char *logical_dev,
+    uint32_t minor,
+    ssu_reqshim_log_fn log_fn,
+    void *log_ctx)
+{
+    char canonical[64];
+    char existing[PATH_MAX];
+    ssize_t existing_len;
+    std::error_code fs_err;
+    std::filesystem::path alias_path(logical_dev);
+    std::filesystem::path parent = alias_path.parent_path();
+
+    if (!logical_dev_needs_alias(logical_dev, minor)) {
+        return SSU_OK;
+    }
+
+    if (parent.empty()) {
+        return SSU_ERR_INVALID;
+    }
+
+    std::filesystem::create_directories(parent, fs_err);
+    if (fs_err) {
+        reqshim_log(log_fn, log_ctx,
+                    "ReqShim logical device directory create failed dir=%s errno=%d",
+                    parent.string().c_str(), fs_err.value());
+        return SSU_ERR_IO;
+    }
+
+    canonical_logical_dev(minor, canonical, sizeof(canonical));
+    if (symlink(canonical, logical_dev) == 0) {
+        reqshim_log(log_fn, log_ctx,
+                    "ReqShim logical device alias created alias=%s target=%s",
+                    logical_dev, canonical);
+        return SSU_OK;
+    }
+
+    if (errno != EEXIST) {
+        reqshim_log(log_fn, log_ctx,
+                    "ReqShim logical device alias create failed alias=%s target=%s errno=%d",
+                    logical_dev, canonical, errno);
+        return SSU_ERR_IO;
+    }
+
+    memset(existing, 0, sizeof(existing));
+    existing_len = readlink(logical_dev, existing, sizeof(existing) - 1);
+    if (existing_len >= 0 && strcmp(existing, canonical) == 0) {
+        return SSU_OK;
+    }
+
+    reqshim_log(log_fn, log_ctx,
+                "ReqShim logical device alias exists with different target alias=%s expected=%s",
+                logical_dev, canonical);
+    return SSU_ERR_BUSY;
+}
+
+static ssu_err_t remove_logical_dev_alias(
+    const char *logical_dev,
+    uint32_t minor,
+    ssu_reqshim_log_fn log_fn,
+    void *log_ctx)
+{
+    if (!logical_dev_needs_alias(logical_dev, minor)) {
+        return SSU_OK;
+    }
+
+    if (unlink(logical_dev) == 0 || errno == ENOENT) {
+        return SSU_OK;
+    }
+
+    reqshim_log(log_fn, log_ctx,
+                "ReqShim logical device alias remove failed alias=%s errno=%d",
+                logical_dev, errno);
+    return SSU_ERR_IO;
 }
 
 static ssu_err_t build_map_entry(const ssu_reqshim_map_spec_t *spec,
@@ -389,6 +483,19 @@ ssu_err_t ssu_reqshim_mount_logdev(
         }
     }
 
+    err = ensure_logical_dev_alias(logical_dev, minor, log_fn, log_ctx);
+    if (err != SSU_OK) {
+        while (i > 0) {
+            i--;
+            do_ioctl(ops, fd, SSU_IOC_MAP_DEL, &entries[i],
+                     "SSU_IOC_MAP_DEL", log_fn, log_ctx);
+        }
+        do_ioctl(ops, fd, SSU_IOC_LOGDEV_DESTROY, &logdev_req,
+                 "SSU_IOC_LOGDEV_DESTROY", log_fn, log_ctx);
+        ops->close_fn(fd);
+        return err;
+    }
+
     ops->close_fn(fd);
     reqshim_log(log_fn, log_ctx,
                 "ReqShim mount success logical_dev=%s minor=%u maps=%u",
@@ -458,6 +565,11 @@ ssu_err_t ssu_reqshim_unmount_logdev(
     err = do_ioctl(ops, fd, SSU_IOC_LOGDEV_DESTROY, &logdev_req,
                    "SSU_IOC_LOGDEV_DESTROY", log_fn, log_ctx);
     ops->close_fn(fd);
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    err = remove_logical_dev_alias(logical_dev, minor, log_fn, log_ctx);
     if (err != SSU_OK) {
         return err;
     }

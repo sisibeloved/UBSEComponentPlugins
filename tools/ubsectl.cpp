@@ -20,15 +20,15 @@ static void usage(void)
     puts("usage: ubsectl <allocate|free|list|allocate-result-get|mount|unmount>");
     puts("       ubsectl allocate --size BYTES [--user USER] [--physical-disks N] [--aggregate|--no-aggregate] [--share exclusive|shared] [--host HOST] [--out FILE]");
     puts("       ubsectl allocate-result-get --request-id ID [--out FILE]");
-    puts("       ubsectl free --dev /dev/ssuN");
+    puts("       ubsectl free --dev /dev/ssu/ssuN");
     puts("       ubsectl list");
     puts("");
     puts("compat:");
     puts("       ubsectl <alloc|mount|unmount|release|query>");
     puts("       ubsectl alloc --size BYTES --stripe|--replica N [--out FILE]");
-    puts("       ubsectl mount --aid AID --host HOST --dev /dev/ssuN");
-    puts("       ubsectl mount --dev /dev/ssuN --host HOST");
-    puts("       ubsectl unmount --dev /dev/ssuN");
+    puts("       ubsectl mount --aid AID --host HOST --dev /dev/ssu/ssuN");
+    puts("       ubsectl mount --dev /dev/ssu/ssuN --host HOST");
+    puts("       ubsectl unmount --dev /dev/ssu/ssuN");
     puts("       ubsectl release --aid AID");
     puts("       ubsectl query --type pool|allocation|logdev");
 }

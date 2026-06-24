@@ -3,7 +3,9 @@
 
 #include <errno.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 #define MAX_CALLS 16
 
@@ -276,6 +278,69 @@ static int run_missing_ctl_policy(void)
     return failed;
 }
 
+static int run_mount_creates_directory_alias(void)
+{
+    const ssu_reqshim_sys_ops_t ops = {
+        fake_open,
+        fake_ioctl,
+        fake_close,
+    };
+    ssu_reqshim_map_spec_t map = {};
+    char root[] = "/tmp/ssu-reqshim-alias-XXXXXX";
+    char dir[128];
+    char logical_dev[160];
+    char target[128];
+    ssize_t target_len;
+    int failed = 0;
+
+    if (mkdtemp(root) == NULL) {
+        perror("mkdtemp");
+        return 1;
+    }
+
+    snprintf(dir, sizeof(dir), "%s/ssu", root);
+    snprintf(logical_dev, sizeof(logical_dev), "%s/ssu4", dir);
+
+    snprintf(map.phys_dev, sizeof(map.phys_dev), "/dev/nvme1n1");
+    snprintf(map.ns_id, sizeof(map.ns_id), "1");
+    map.length = 4096;
+
+    reset_fake();
+    failed |= expect_err("mount alias",
+                         ssu_reqshim_mount_logdev(logical_dev, &map, 1, 0,
+                                                  fake_log, NULL, &ops,
+                                                  "/tmp/ssu-ctl"),
+                         SSU_OK);
+
+    memset(target, 0, sizeof(target));
+    target_len = readlink(logical_dev, target, sizeof(target) - 1);
+    if (target_len < 0) {
+        fputs("mount should create a logical device alias symlink\n", stderr);
+        failed = 1;
+    } else if (strcmp(target, "/dev/ssu4") != 0) {
+        fprintf(stderr, "alias target mismatch: %s\n", target);
+        failed = 1;
+    }
+
+    reset_fake();
+    failed |= expect_err("unmount alias",
+                         ssu_reqshim_unmount_logdev(logical_dev, &map, 1, 0,
+                                                    fake_log, NULL, &ops,
+                                                    "/tmp/ssu-ctl"),
+                         SSU_OK);
+
+    if (readlink(logical_dev, target, sizeof(target) - 1) >= 0) {
+        fputs("unmount should remove the logical device alias symlink\n",
+              stderr);
+        failed = 1;
+    }
+
+    unlink(logical_dev);
+    rmdir(dir);
+    rmdir(root);
+    return failed;
+}
+
 static int run_minor_parser(void)
 {
     uint32_t minor = 99;
@@ -283,6 +348,16 @@ static int run_minor_parser(void)
 
     failed |= expect_err("parse /dev/ssu12",
                          ssu_reqshim_parse_logical_minor("/dev/ssu12",
+                                                         &minor),
+                         SSU_OK);
+    failed |= minor != 12;
+    failed |= expect_err("parse /dev/ssu/ssu12",
+                         ssu_reqshim_parse_logical_minor("/dev/ssu/ssu12",
+                                                         &minor),
+                         SSU_OK);
+    failed |= minor != 12;
+    failed |= expect_err("parse nested ssu12",
+                         ssu_reqshim_parse_logical_minor("/tmp/x/ssu/ssu12",
                                                          &minor),
                          SSU_OK);
     failed |= minor != 12;
@@ -303,6 +378,7 @@ int main(void)
     failed |= run_unmount_builds_expected_ioctls();
     failed |= run_unmount_without_maps_destroys_logdev();
     failed |= run_missing_ctl_policy();
+    failed |= run_mount_creates_directory_alias();
 
     return failed == 0 ? 0 : 1;
 }

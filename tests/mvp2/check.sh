@@ -78,7 +78,7 @@ test "$rid" = "alloc-1"
 
 result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$rid")
 dev=$(printf '%s\n' "$result" | sed -n '1p')
-test "$dev" = "/dev/ssu1"
+test "$dev" = "/dev/ssu/ssu1"
 printf '%s\n' "$result" | grep -q '^physical 0 mock-ssu0 mock-ns[0-9][0-9]* 0 4096 lba=0$'
 printf '%s\n' "$result" | grep -q '^physical 1 mock-ssu1 mock-ns[0-9][0-9]* 4096 4096 lba=0$'
 printf '%s\n' "$result" | grep -q '^physical 2 mock-ssu2 mock-ns[0-9][0-9]* 8192 4096 lba=0$'

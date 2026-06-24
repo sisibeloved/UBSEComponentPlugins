@@ -165,20 +165,33 @@ static int parse_prefixed_u32(const char *s, const char *prefix,
     return 1;
 }
 
+static int parse_logical_dev_index(const char *device_path, uint32_t *out)
+{
+    const char *base;
+
+    if (is_empty_string(device_path) || out == NULL) {
+        return 0;
+    }
+
+    base = strrchr(device_path, '/');
+    base = base == NULL ? device_path : base + 1;
+    return parse_prefixed_u32(base, "ssu", out);
+}
+
 static void default_device_path_for_request(const char *request_id,
                                             char *out, size_t n)
 {
     uint32_t index;
 
     if (parse_prefixed_u32(request_id, "alloc-", &index)) {
-        snprintf(out, n, "/dev/ssu%u", index);
+        snprintf(out, n, "/dev/ssu/ssu%u", index);
         if (index >= next_api_device_index) {
             next_api_device_index = index + 1U;
         }
         return;
     }
 
-    snprintf(out, n, "/dev/ssu%u", next_api_device_index);
+    snprintf(out, n, "/dev/ssu/ssu%u", next_api_device_index);
     next_api_device_index++;
 }
 
@@ -187,7 +200,7 @@ static int device_path_to_request_id(const char *device_path,
 {
     uint32_t index;
 
-    if (!parse_prefixed_u32(device_path, "/dev/ssu", &index)) {
+    if (!parse_logical_dev_index(device_path, &index)) {
         return 0;
     }
 

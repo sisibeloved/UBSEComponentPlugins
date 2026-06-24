@@ -71,7 +71,7 @@ int main(void)
     }
 
     if (result.status != SSU_OK ||
-        strcmp(result.device_path, "/dev/ssu0") != 0 ||
+        strcmp(result.device_path, "/dev/ssu/ssu0") != 0 ||
         result.physical_disk_count != 1 ||
         strcmp(result.physical_disks[0].ssu_id, "mock-ssu0") != 0 ||
         strcmp(result.physical_disks[0].ns_id, "mock-ns0") != 0 ||
@@ -101,7 +101,7 @@ int main(void)
     }
 
     if (logdev_count != 1 ||
-        strcmp(logdevs[0].logical_dev, "/dev/ssu0") != 0 ||
+        strcmp(logdevs[0].logical_dev, "/dev/ssu/ssu0") != 0 ||
         strcmp(logdevs[0].host_id, "nodeA") != 0 ||
         strcmp(logdevs[0].allocate_id, "alloc-0") != 0) {
         fputs("logical mount did not create expected mapping\n", stderr);
@@ -149,7 +149,7 @@ int main(void)
     }
 
     if (result.status != SSU_OK ||
-        strcmp(result.device_path, "/dev/ssu1") != 0 ||
+        strcmp(result.device_path, "/dev/ssu/ssu1") != 0 ||
         result.physical_disk_count != 3 ||
         strcmp(result.physical_disks[0].ssu_id, "mock-ssu0") != 0 ||
         strcmp(result.physical_disks[1].ssu_id, "mock-ssu1") != 0 ||
@@ -184,9 +184,9 @@ int main(void)
     }
 
     if (logdev_count != 3 ||
-        strcmp(logdevs[0].logical_dev, "/dev/ssu1") != 0 ||
-        strcmp(logdevs[1].logical_dev, "/dev/ssu1") != 0 ||
-        strcmp(logdevs[2].logical_dev, "/dev/ssu1") != 0 ||
+        strcmp(logdevs[0].logical_dev, "/dev/ssu/ssu1") != 0 ||
+        strcmp(logdevs[1].logical_dev, "/dev/ssu/ssu1") != 0 ||
+        strcmp(logdevs[2].logical_dev, "/dev/ssu/ssu1") != 0 ||
         strcmp(logdevs[0].phys_dev, "/dev/nullb0") != 0 ||
         strcmp(logdevs[1].phys_dev, "/dev/nullb1") != 0 ||
         strcmp(logdevs[2].phys_dev, "/dev/nullb2") != 0) {

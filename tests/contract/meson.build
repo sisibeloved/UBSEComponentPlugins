@@ -101,6 +101,17 @@ if get_option('vendor') == 'mock'
 
   test('api_logical', api_logical)
 
+  api_lba_offsets = executable(
+    'api_lba_offsets',
+    sources: ['api_lba_offsets.cpp'],
+    include_directories: inc,
+    dependencies: [
+      ssu_api_dep,
+    ],
+  )
+
+  test('api_lba_offsets', api_lba_offsets)
+
   dlopen_deps = [ssu_headers_dep]
   dl_dep = cpp.find_library('dl', required: false)
   if dl_dep.found()

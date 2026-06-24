@@ -7,6 +7,7 @@
 #define SSU_CONTROLLER_MAX_ALLOCATIONS 128U
 #define SSU_CONTROLLER_MAX_RELEASED 128U
 #define SSU_CONTROLLER_MAX_LOGDEVS 128U
+#define SSU_CONTROLLER_SECTOR_SIZE 512ULL
 
 static ssu_resource_info_t pool[SSU_CONTROLLER_MAX_RESOURCES];
 static uint32_t pool_count;
@@ -398,13 +399,24 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
             err = SSU_ERR_NO_RESOURCE;
             goto rollback;
         }
+        if (pool[pool_index].used_bytes > pool[pool_index].total_bytes ||
+            length > pool[pool_index].total_bytes -
+                         pool[pool_index].used_bytes) {
+            err = SSU_ERR_NO_RESOURCE;
+            goto rollback;
+        }
+        if (pool[pool_index].used_bytes % SSU_CONTROLLER_SECTOR_SIZE != 0) {
+            err = SSU_ERR_INVALID;
+            goto rollback;
+        }
 
         memset(&extent_req, 0, sizeof(extent_req));
         extent_req.allocate_id = allocate_id;
         extent_req.ssu_id = pool[pool_index].ssu_id;
         extent_req.logical_offset = logical_offset;
         extent_req.length = length;
-        extent_req.phys_offset_hint = 0;
+        extent_req.phys_offset_hint =
+            pool[pool_index].used_bytes / SSU_CONTROLLER_SECTOR_SIZE;
         extent_req.policy = req->reliability;
         extent_req.role_index = i;
         extent_req.tenant = req->tenant;
