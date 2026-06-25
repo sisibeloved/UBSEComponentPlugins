@@ -101,6 +101,17 @@ if get_option('vendor') == 'mock'
 
   test('api_logical', api_logical)
 
+  api_named_idempotent = executable(
+    'api_named_idempotent',
+    sources: ['api_named_idempotent.cpp'],
+    include_directories: inc,
+    dependencies: [
+      ssu_api_dep,
+    ],
+  )
+
+  test('api_named_idempotent', api_named_idempotent)
+
   api_lba_offsets = executable(
     'api_lba_offsets',
     sources: ['api_lba_offsets.cpp'],

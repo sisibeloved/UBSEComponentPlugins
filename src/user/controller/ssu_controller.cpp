@@ -7,7 +7,9 @@
 #define SSU_CONTROLLER_MAX_ALLOCATIONS 128U
 #define SSU_CONTROLLER_MAX_RELEASED 128U
 #define SSU_CONTROLLER_MAX_LOGDEVS 128U
+#define SSU_CONTROLLER_MAX_HOSTS 32U
 #define SSU_CONTROLLER_SECTOR_SIZE 512ULL
+#define SSU_CONTROLLER_HOST_KEY_SIZE 256U
 
 static ssu_resource_info_t pool[SSU_CONTROLLER_MAX_RESOURCES];
 static uint32_t pool_count;
@@ -16,6 +18,7 @@ static uint64_t next_allocation_id;
 typedef struct {
     int active;
     ssu_allocation_info_t info;
+    char host_key[SSU_CONTROLLER_HOST_KEY_SIZE];
 } controller_allocation_t;
 
 typedef struct {
@@ -137,6 +140,117 @@ static int is_empty_string(const char *s)
     return s == NULL || s[0] == '\0';
 }
 
+static int is_disk_name_char(char c)
+{
+    return (c >= 'a' && c <= 'z') ||
+           (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') ||
+           c == '_' || c == '-' || c == '.' || c == ':';
+}
+
+static int allocation_name_is_valid(const char *name)
+{
+    size_t i;
+    size_t len;
+
+    if (is_empty_string(name)) {
+        return 0;
+    }
+
+    len = strlen(name);
+    if (len >= sizeof(allocations[0].info.allocate_id)) {
+        return 0;
+    }
+
+    for (i = 0; i < len; i++) {
+        if (!is_disk_name_char(name[i])) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static int nullable_cstr_equal(const char *a, const char *b)
+{
+    const char *left = a == NULL ? "" : a;
+    const char *right = b == NULL ? "" : b;
+
+    return strcmp(left, right) == 0;
+}
+
+static int append_host_key(char *dst, size_t n, const char *host,
+                           int needs_comma)
+{
+    size_t used;
+    int written;
+
+    if (dst == NULL || n == 0 || is_empty_string(host) ||
+        strchr(host, ',') != NULL) {
+        return 0;
+    }
+
+    used = strlen(dst);
+    if (used >= n) {
+        return 0;
+    }
+
+    written = snprintf(dst + used, n - used, "%s%s",
+                       needs_comma ? "," : "", host);
+    return written >= 0 && (size_t)written < n - used;
+}
+
+static int build_host_key(const char *const *hosts, uint32_t host_count,
+                          char *out, size_t n)
+{
+    const char *ordered[SSU_CONTROLLER_MAX_HOSTS];
+    uint32_t i;
+    uint32_t j;
+
+    if (out == NULL || n == 0) {
+        return 0;
+    }
+
+    out[0] = '\0';
+    if (host_count == 0) {
+        return 1;
+    }
+
+    if (hosts == NULL) {
+        return 0;
+    }
+
+    if (host_count > SSU_CONTROLLER_MAX_HOSTS) {
+        return 0;
+    }
+
+    for (i = 0; i < host_count; i++) {
+        if (is_empty_string(hosts[i]) || strchr(hosts[i], ',') != NULL) {
+            return 0;
+        }
+        ordered[i] = hosts[i];
+    }
+
+    for (i = 1; i < host_count; i++) {
+        const char *host = ordered[i];
+
+        j = i;
+        while (j > 0 && strcmp(ordered[j - 1], host) > 0) {
+            ordered[j] = ordered[j - 1];
+            j--;
+        }
+        ordered[j] = host;
+    }
+
+    for (i = 0; i < host_count; i++) {
+        if (!append_host_key(out, n, ordered[i], i > 0)) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 static controller_logdev_t *find_logdev_by_dev(const char *logical_dev)
 {
     uint32_t i;
@@ -149,6 +263,38 @@ static controller_logdev_t *find_logdev_by_dev(const char *logical_dev)
     }
 
     return NULL;
+}
+
+static uint32_t find_allocation_rows(
+    const char *allocate_id,
+    controller_allocation_t **out,
+    uint32_t max_count)
+{
+    uint32_t count = 0;
+    uint32_t i;
+
+    if (is_empty_string(allocate_id)) {
+        return 0;
+    }
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
+        if (!allocations[i].active ||
+            strcmp(allocations[i].info.allocate_id, allocate_id) != 0) {
+            continue;
+        }
+
+        if (out != NULL && count < max_count) {
+            out[count] = &allocations[i];
+        }
+        count++;
+    }
+
+    return count;
+}
+
+static int allocation_id_is_active(const char *allocate_id)
+{
+    return find_allocation_rows(allocate_id, NULL, 0) > 0;
 }
 
 static int allocation_has_logdev(const char *allocate_id)
@@ -214,6 +360,18 @@ static void remember_released_id(const char *allocate_id)
     copy_cstr(released_ids[released_count], sizeof(released_ids[0]),
               allocate_id);
     released_count++;
+}
+
+static void next_auto_allocate_id(char *out, size_t n)
+{
+    for (;;) {
+        snprintf(out, n, "alloc-%llu",
+                 (unsigned long long)next_allocation_id);
+        if (!allocation_id_is_active(out) && !released_id_exists(out)) {
+            return;
+        }
+        next_allocation_id++;
+    }
 }
 
 static int find_resource_index(const ssu_resource_info_t *resources,
@@ -323,6 +481,75 @@ ssu_err_t ssu_controller_query_pool(ssu_resource_info_t *out,
     return SSU_OK;
 }
 
+static ssu_err_t copy_existing_allocation(
+    const ssu_alloc_req_t *req,
+    const char *allocate_id,
+    ssu_alloc_result_t *out,
+    ssu_alloc_extent_t *out_extents,
+    uint32_t *inout_extent_count)
+{
+    controller_allocation_t *rows[SSU_CONTROLLER_MAX_ALLOCATIONS];
+    char host_key[SSU_CONTROLLER_HOST_KEY_SIZE];
+    uint32_t extent_count;
+    uint64_t total_size = 0;
+    uint32_t i;
+
+    memset(rows, 0, sizeof(rows));
+    extent_count = find_allocation_rows(allocate_id, rows,
+                                        SSU_CONTROLLER_MAX_ALLOCATIONS);
+    if (extent_count == 0) {
+        return SSU_ERR_NOT_FOUND;
+    }
+
+    for (i = 0; i < extent_count; i++) {
+        total_size += rows[i]->info.length;
+    }
+
+    if (!build_host_key(req->host_ids, req->host_count, host_key,
+                        sizeof(host_key))) {
+        return SSU_ERR_INVALID;
+    }
+
+    if (total_size != req->size_bytes ||
+        (req->physical_disk_count > 0 &&
+         req->physical_disk_count != extent_count) ||
+        rows[0]->info.policy != req->reliability ||
+        rows[0]->info.share_type != req->share_type ||
+        !nullable_cstr_equal(rows[0]->info.tenant, req->tenant) ||
+        strcmp(rows[0]->host_key, host_key) != 0) {
+        return SSU_ERR_NS_EXISTS;
+    }
+
+    if (out_extents == NULL || *inout_extent_count < extent_count) {
+        *inout_extent_count = extent_count;
+        return SSU_ERR_BUFFER_TOO_SMALL;
+    }
+
+    memset(out, 0, sizeof(*out));
+    memset(out_extents, 0, sizeof(out_extents[0]) * extent_count);
+    for (i = 0; i < extent_count; i++) {
+        int pool_index = find_resource_index(pool, pool_count,
+                                             rows[i]->info.ssu_id);
+
+        copy_cstr(out_extents[i].ssu_id, sizeof(out_extents[i].ssu_id),
+                  rows[i]->info.ssu_id);
+        if (pool_index >= 0) {
+            copy_cstr(out_extents[i].host_id, sizeof(out_extents[i].host_id),
+                      pool[pool_index].host_id);
+        }
+        copy_cstr(out_extents[i].ns_id, sizeof(out_extents[i].ns_id),
+                  rows[i]->info.ns_id);
+        out_extents[i].logical_offset = rows[i]->info.logical_offset;
+        out_extents[i].length = rows[i]->info.length;
+    }
+
+    copy_cstr(out->allocate_id, sizeof(out->allocate_id), allocate_id);
+    out->logical_size_bytes = total_size;
+    out->extent_count = extent_count;
+    *inout_extent_count = extent_count;
+    return SSU_OK;
+}
+
 ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
                                const ssu_alloc_req_t *req,
                                ssu_alloc_result_t *out,
@@ -341,6 +568,8 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
     ssu_err_t err;
     uint32_t i;
     uint32_t created_count = 0;
+    int named_allocation;
+    char host_key[SSU_CONTROLLER_HOST_KEY_SIZE];
 
     if (plugin == NULL || plugin->create_ns == NULL || req == NULL ||
         out == NULL || inout_extent_count == NULL) {
@@ -353,6 +582,27 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
 
     if (req->size_bytes == 0) {
         return SSU_ERR_INVALID;
+    }
+
+    if (!build_host_key(req->host_ids, req->host_count, host_key,
+                        sizeof(host_key))) {
+        return SSU_ERR_INVALID;
+    }
+
+    named_allocation = !is_empty_string(req->disk_name);
+    if (named_allocation && !allocation_name_is_valid(req->disk_name)) {
+        return SSU_ERR_INVALID;
+    }
+
+    if (named_allocation) {
+        copy_cstr(allocate_id, sizeof(allocate_id), req->disk_name);
+        if (allocation_id_is_active(allocate_id)) {
+            return copy_existing_allocation(req, allocate_id, out,
+                                            out_extents,
+                                            inout_extent_count);
+        }
+    } else {
+        next_auto_allocate_id(allocate_id, sizeof(allocate_id));
     }
 
     extent_count = online_pool_indexes(pool_indexes);
@@ -379,9 +629,6 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
     if (free_allocation_slot_count() < extent_count) {
         return SSU_ERR_NO_RESOURCE;
     }
-
-    snprintf(allocate_id, sizeof(allocate_id), "alloc-%llu",
-             (unsigned long long)next_allocation_id);
 
     memset(out, 0, sizeof(*out));
     memset(out_extents, 0, sizeof(out_extents[0]) * extent_count);
@@ -433,6 +680,7 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
         copy_cstr(slot->info.allocate_id, sizeof(slot->info.allocate_id),
                   allocate_id);
         copy_cstr(slot->info.tenant, sizeof(slot->info.tenant), req->tenant);
+        copy_cstr(slot->host_key, sizeof(slot->host_key), host_key);
         slot->info.policy = req->reliability;
         slot->info.share_type = req->share_type;
         copy_cstr(slot->info.state, sizeof(slot->info.state), "ACTIVE");
@@ -462,7 +710,9 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
     out->logical_size_bytes = req->size_bytes;
     out->extent_count = extent_count;
     *inout_extent_count = extent_count;
-    next_allocation_id++;
+    if (!named_allocation) {
+        next_allocation_id++;
+    }
     return SSU_OK;
 
 rollback:

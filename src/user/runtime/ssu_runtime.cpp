@@ -431,6 +431,7 @@ static ssu_err_t handle_allocate(char *save, char *body, size_t n)
     char *aggregate_s = strtok_r(NULL, " ", &save);
     char *user_s = strtok_r(NULL, " ", &save);
     char *hosts_s = strtok_r(NULL, " ", &save);
+    char *disk_name_s = strtok_r(NULL, " ", &save);
     const char *hosts[32];
     char *host_save = NULL;
     char *host;
@@ -461,6 +462,8 @@ static ssu_err_t handle_allocate(char *save, char *body, size_t n)
     req.physical_disk_count = (uint32_t)strtoul(physical_disks_s, NULL, 10);
     req.logical_disk_aggregate = (int)strtol(aggregate_s, NULL, 10);
     req.user_id = strcmp(user_s, "-") == 0 ? NULL : user_s;
+    req.disk_name = disk_name_s == NULL || strcmp(disk_name_s, "-") == 0 ?
+                    NULL : disk_name_s;
     req.host_ids = hosts;
 
     memset(&result, 0, sizeof(result));

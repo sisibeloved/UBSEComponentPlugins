@@ -548,6 +548,7 @@ ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
     ssu_alloc_req_t resource_req = {};
     ssu_alloc_result_t alloc_result;
     ssu_err_t err;
+    int existing_named_allocation = 0;
 
     err = ensure_api_initialized();
     if (err != SSU_OK) {
@@ -581,12 +582,19 @@ ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
     }
 
     resource_req.size_bytes = req->size_bytes;
+    resource_req.disk_name = req->disk_name;
     resource_req.physical_disk_count =
         req->physical_disk_count == 0 ? 1 : req->physical_disk_count;
     resource_req.reliability = SSU_RELIABILITY_STRIPE;
     resource_req.share_type = req->allocation_type;
     resource_req.map_dir = SSU_MAP_DIR_FORWARD;
     resource_req.tenant = req->user_id;
+    resource_req.host_ids = req->host_ids;
+    resource_req.host_count = req->host_count;
+
+    if (!is_empty_string(req->disk_name)) {
+        existing_named_allocation = allocation_exists(req->disk_name);
+    }
 
     memset(&alloc_result, 0, sizeof(alloc_result));
     err = ssu_resource_alloc(&resource_req, &alloc_result, NULL, NULL);
@@ -598,7 +606,9 @@ ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
     copy_cstr(out->request_id, sizeof(out->request_id),
               alloc_result.allocate_id);
     if (register_request_path(out->request_id) == NULL) {
-        ssu_resource_release(out->request_id);
+        if (!existing_named_allocation) {
+            ssu_resource_release(out->request_id);
+        }
         memset(out, 0, sizeof(*out));
         return SSU_ERR_INTERNAL;
     }

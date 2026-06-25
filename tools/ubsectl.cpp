@@ -18,7 +18,7 @@
 static void usage(void)
 {
     puts("usage: ubsectl <allocate|free|list|allocate-result-get|mount|unmount>");
-    puts("       ubsectl allocate --size BYTES [--user USER] [--physical-disks N] [--aggregate|--no-aggregate] [--share exclusive|shared] [--host HOST] [--out FILE]");
+    puts("       ubsectl allocate --size BYTES [--name NAME] [--user USER] [--physical-disks N] [--aggregate|--no-aggregate] [--share exclusive|shared] [--host HOST] [--out FILE]");
     puts("       ubsectl allocate-result-get --request-id ID [--out FILE]");
     puts("       ubsectl free --dev /dev/ssu/ssuN");
     puts("       ubsectl list");
@@ -181,6 +181,23 @@ static int build_host_list(char *buf, size_t n,
             return 0;
         }
         used += (size_t)rc;
+    }
+
+    return 1;
+}
+
+static int is_manager_token_safe(const char *s)
+{
+    const char *p;
+
+    if (is_empty_string(s)) {
+        return 0;
+    }
+
+    for (p = s; *p != '\0'; p++) {
+        if (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') {
+            return 0;
+        }
     }
 
     return 1;
@@ -664,6 +681,7 @@ static int cmd_allocate(int argc, char **argv)
     uint32_t host_count = 0;
     const char *out_path = NULL;
     const char *user = "default";
+    const char *disk_name = NULL;
     char host_list[256];
     char command[512];
     char response[RESPONSE_SIZE];
@@ -692,6 +710,16 @@ static int cmd_allocate(int argc, char **argv)
                 return 1;
             }
             user = argv[++i];
+            continue;
+        }
+
+        if (strcmp(argv[i], "--name") == 0 ||
+            strcmp(argv[i], "--disk-name") == 0) {
+            if (i + 1 >= argc || !is_manager_token_safe(argv[i + 1])) {
+                usage();
+                return 1;
+            }
+            disk_name = argv[++i];
             continue;
         }
 
@@ -756,6 +784,7 @@ static int cmd_allocate(int argc, char **argv)
     }
 
     req.user_id = user;
+    req.disk_name = disk_name;
     req.host_ids = hosts;
     req.host_count = host_count;
 
@@ -765,13 +794,14 @@ static int cmd_allocate(int argc, char **argv)
             usage();
             return 1;
         }
-        snprintf(command, sizeof(command), "ALLOCATE %llu %d %u %d %s %s",
+        snprintf(command, sizeof(command), "ALLOCATE %llu %d %u %d %s %s %s",
                  (unsigned long long)req.size_bytes,
                  (int)req.allocation_type,
                  req.physical_disk_count,
                  req.logical_disk_aggregate,
                  is_empty_string(user) ? "-" : user,
-                 host_list);
+                 host_list,
+                 is_empty_string(disk_name) ? "-" : disk_name);
         if (!manager_request(command, response, sizeof(response))) {
             return 1;
         }

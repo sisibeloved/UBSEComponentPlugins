@@ -169,3 +169,49 @@ grep -q 'mount success allocate_id=alloc-0 host_id=local logical_dev=/dev/ssu0' 
 grep -q 'unmount success logical_dev=/dev/ssu0 allocate_id=alloc-0 host_id=local' "$log_file"
 grep -q 'delete_ns success ssu_id=lbc-mock-ssu0 ns_id=1' "$log_file"
 grep -q 'delete_ns success ssu_id=lbc-mock-ssu2 ns_id=4' "$log_file"
+
+SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
+    --size 8192 \
+    --name data-a \
+    --user user-lbc \
+    --physical-disks 2 \
+    --aggregate \
+    --share exclusive \
+    --host local \
+    --out "$aid_file"
+named=$(cat "$aid_file")
+test "$named" = "data-a"
+
+SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
+    --size 8192 \
+    --name data-a \
+    --user user-lbc \
+    --physical-disks 2 \
+    --aggregate \
+    --share exclusive \
+    --host local \
+    --out "$aid_file"
+test "$(cat "$aid_file")" = "data-a"
+
+alloc_rows=$(SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation |
+    grep -c '^data-a[[:space:]]')
+test "$alloc_rows" = "2"
+
+if SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
+    --size 12288 \
+    --name data-a \
+    --user user-lbc \
+    --physical-disks 2 \
+    --aggregate \
+    --share exclusive \
+    --host local; then
+    echo "conflicting named allocate should fail" >&2
+    exit 1
+fi
+
+result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$named")
+dev=$(printf '%s\n' "$result" | sed -n '1p')
+test "$dev" = "/dev/ssu/ssu2"
+SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"
+test ! -e "$dev_dir/nvme1n1"
+test ! -e "$dev_dir/nvme1n2"

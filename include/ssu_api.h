@@ -26,6 +26,7 @@ typedef enum {
 
 typedef struct {
     uint64_t size_bytes;
+    const char *disk_name;
     uint64_t io_bandwidth_bps;
     uint32_t physical_disk_count;
     ssu_reliability_t reliability;
@@ -36,6 +37,8 @@ typedef struct {
     uint64_t share_range[2];
     ssu_map_dir_t map_dir;
     const char *tenant;
+    const char *const *host_ids;
+    uint32_t host_count;
 } ssu_alloc_req_t;
 
 typedef struct {
@@ -108,6 +111,7 @@ typedef struct {
 
 typedef struct {
     uint64_t size_bytes;
+    const char *disk_name;
     const char *user_id;
     uint32_t physical_disk_count;
     int logical_disk_aggregate;
