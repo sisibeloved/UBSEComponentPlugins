@@ -169,7 +169,7 @@ static const char *operation_error_hint(const char *plugin_name,
         if ((strcmp(operation, "mount") == 0 ||
              strcmp(operation, "unmount") == 0) &&
             err == SSU_ERR_KERNEL) {
-            return "lbc_mock failed to program ReqShim. Check that ssu_reqshim.ko is loaded and /dev/ssu/ctl exists; see ssu-mgr stderr and /tmp/ubse-lbc-mock.log for the failing ReqShim open/ioctl errno.";
+            return "lbc_mock failed to program ReqShim. Check that ssu_reqshim.ko is loaded and /dev/ssu-ctl exists; see ssu-mgr stderr and /tmp/ubse-lbc-mock.log for the failing ReqShim open/ioctl errno.";
         }
 
         if (err == SSU_ERR_NOT_FOUND) {

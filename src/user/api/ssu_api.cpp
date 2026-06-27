@@ -178,10 +178,74 @@ static int parse_logical_dev_index(const char *device_path, uint32_t *out)
     return parse_prefixed_u32(base, "ssu", out);
 }
 
+static int allocation_disk_name(const char *request_id, char *out, size_t n)
+{
+    ssu_query_req_t req = {};
+    ssu_allocation_info_t allocations[128];
+    uint32_t count = 128;
+    uint32_t i;
+    ssu_err_t err;
+
+    if (is_empty_string(request_id) || out == NULL || n == 0) {
+        return 0;
+    }
+
+    req.type = SSU_QUERY_ALLOCATION;
+    err = ssu_resource_query(&req, allocations, sizeof(allocations[0]),
+                             &count);
+    if (err != SSU_OK) {
+        return 0;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (strcmp(allocations[i].allocate_id, request_id) == 0 &&
+            !is_empty_string(allocations[i].disk_name)) {
+            copy_cstr(out, n, allocations[i].disk_name);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int allocation_name_exists(const char *disk_name)
+{
+    ssu_query_req_t req = {};
+    ssu_allocation_info_t allocations[128];
+    uint32_t count = 128;
+    uint32_t i;
+    ssu_err_t err;
+
+    if (is_empty_string(disk_name)) {
+        return 0;
+    }
+
+    req.type = SSU_QUERY_ALLOCATION;
+    err = ssu_resource_query(&req, allocations, sizeof(allocations[0]),
+                             &count);
+    if (err != SSU_OK) {
+        return 0;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (strcmp(allocations[i].disk_name, disk_name) == 0) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static void default_device_path_for_request(const char *request_id,
+                                            const char *disk_name,
                                             char *out, size_t n)
 {
     uint32_t index;
+
+    if (!is_empty_string(disk_name)) {
+        snprintf(out, n, "/dev/ssu/%s", disk_name);
+        return;
+    }
 
     if (parse_prefixed_u32(request_id, "alloc-", &index)) {
         snprintf(out, n, "/dev/ssu/ssu%u", index);
@@ -236,12 +300,25 @@ static api_request_t *find_request_by_device(const char *device_path)
     return NULL;
 }
 
-static api_request_t *register_request_path(const char *request_id)
+static api_request_t *register_request_path_with_name(
+    const char *request_id,
+    const char *disk_name)
 {
     api_request_t *slot = find_request_by_id(request_id);
+    char allocation_name[64];
     uint32_t i;
 
+    memset(allocation_name, 0, sizeof(allocation_name));
+    if (is_empty_string(disk_name)) {
+        allocation_disk_name(request_id, allocation_name,
+                             sizeof(allocation_name));
+        disk_name = allocation_name;
+    }
+
     if (slot != NULL) {
+        default_device_path_for_request(request_id, disk_name,
+                                        slot->device_path,
+                                        sizeof(slot->device_path));
         return slot;
     }
 
@@ -251,7 +328,7 @@ static api_request_t *register_request_path(const char *request_id)
             api_requests[i].active = 1;
             copy_cstr(api_requests[i].request_id,
                       sizeof(api_requests[i].request_id), request_id);
-            default_device_path_for_request(request_id,
+            default_device_path_for_request(request_id, disk_name,
                                             api_requests[i].device_path,
                                             sizeof(api_requests[i].device_path));
             return &api_requests[i];
@@ -259,6 +336,11 @@ static api_request_t *register_request_path(const char *request_id)
     }
 
     return NULL;
+}
+
+static api_request_t *register_request_path(const char *request_id)
+{
+    return register_request_path_with_name(request_id, NULL);
 }
 
 static void forget_request_path(const char *request_id)
@@ -367,6 +449,47 @@ static int logdev_request_id(const char *device_path, char *out, size_t n)
     return 0;
 }
 
+static int named_allocation_request_id(const char *device_path,
+                                       char *out,
+                                       size_t n)
+{
+    ssu_query_req_t req = {};
+    ssu_allocation_info_t allocations[128];
+    const char *base;
+    uint32_t count = 128;
+    uint32_t i;
+    ssu_err_t err;
+
+    if (is_empty_string(device_path) || out == NULL || n == 0) {
+        return 0;
+    }
+
+    base = strrchr(device_path, '/');
+    base = base == NULL ? device_path : base + 1;
+    if (is_empty_string(base)) {
+        return 0;
+    }
+
+    req.type = SSU_QUERY_ALLOCATION;
+    err = ssu_resource_query(&req, allocations, sizeof(allocations[0]),
+                             &count);
+    if (err != SSU_OK) {
+        return 0;
+    }
+
+    for (i = 0; i < count; i++) {
+        if (!is_empty_string(allocations[i].disk_name) &&
+            strcmp(allocations[i].disk_name, base) == 0) {
+            register_request_path_with_name(allocations[i].allocate_id,
+                                            allocations[i].disk_name);
+            copy_cstr(out, n, allocations[i].allocate_id);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 static ssu_err_t request_id_from_device_path(const char *device_path,
                                              char *out, size_t n)
 {
@@ -393,6 +516,10 @@ static ssu_err_t request_id_from_device_path(const char *device_path,
         allocation_exists(request_id)) {
         register_request_path(request_id);
         copy_cstr(out, n, request_id);
+        return SSU_OK;
+    }
+
+    if (named_allocation_request_id(device_path, out, n)) {
         return SSU_OK;
     }
 
@@ -593,7 +720,7 @@ ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
     resource_req.host_count = req->host_count;
 
     if (!is_empty_string(req->disk_name)) {
-        existing_named_allocation = allocation_exists(req->disk_name);
+        existing_named_allocation = allocation_name_exists(req->disk_name);
     }
 
     memset(&alloc_result, 0, sizeof(alloc_result));
@@ -605,7 +732,8 @@ ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
     memset(out, 0, sizeof(*out));
     copy_cstr(out->request_id, sizeof(out->request_id),
               alloc_result.allocate_id);
-    if (register_request_path(out->request_id) == NULL) {
+    if (register_request_path_with_name(out->request_id,
+                                        req->disk_name) == NULL) {
         if (!existing_named_allocation) {
             ssu_resource_release(out->request_id);
         }

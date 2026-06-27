@@ -196,7 +196,6 @@ static int create_fake_lbc_prefix(const char *prefix, const char *dev_dir,
                    "  esac\n"
                    "done\n"
                    "if [ \"$sample\" = './sample_create_attach' ]; then\n"
-                   "  test \"$nsze\" = '1048576'\n"
                    "  nsid=$(next_nsid)\n"
                    "  : > '%s/nvme1n'\"$nsid\"\n"
                    "  mkdir -p '%s'/\"$subnqn\"/namespaces/\"$nsid\"\n"
@@ -277,7 +276,8 @@ static int run_plugin_flow(const char *prefix, const char *dev_dir,
 
     req.allocate_id = "alloc-test";
     req.ssu_id = resources[0].ssu_id;
-    req.length = 512ULL * 1024ULL * 1024ULL;
+    req.length = 256ULL * 1024ULL * 1024ULL;
+    req.phys_offset_hint = 128;
     req.policy = SSU_RELIABILITY_STRIPE;
 
     memset(ns_id, 0, sizeof(ns_id));
@@ -289,7 +289,7 @@ static int run_plugin_flow(const char *prefix, const char *dev_dir,
         return 1;
     }
 
-    if (strcmp(ns_id, "1") != 0 || phys_sector != 0) {
+    if (strcmp(ns_id, "1") != 0 || phys_sector != 128) {
         fputs("create_ns returned unexpected ns metadata\n", stderr);
         return 1;
     }
@@ -334,7 +334,7 @@ static int run_plugin_flow(const char *prefix, const char *dev_dir,
     }
 
     if (!file_contains(log_path, "setup nqn.2025-01.io.ssu:m0 4420") ||
-        !file_contains(log_path, "--nsze 1048576") ||
+        !file_contains(log_path, "--nsze 524288") ||
         !file_contains(log_path, "--nsid 1") ||
         !file_contains(log_path, expected_dev)) {
         fputs("LBC mock scripts did not receive expected arguments\n",
@@ -408,7 +408,7 @@ static int run_real_plugin_flow(const char *prefix)
     }
 
     if (block_device_size_bytes(dev_path) != 512ULL * 1024ULL * 1024ULL) {
-        fprintf(stderr, "expected %s to be 512M from nsze=1048576\n",
+        fprintf(stderr, "expected %s to match the 512M request\n",
                 dev_path);
         return 1;
     }

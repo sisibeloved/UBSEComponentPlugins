@@ -70,10 +70,9 @@ int main(int argc, char **argv)
     failed |= expect_contains("reqshim_iface", iface,
                               "SSU_REQSHIM_DEFAULT_CTL_PATH");
     failed |= expect_contains("reqshim_iface", iface,
-                              "SSU_REQSHIM_LEGACY_CTL_PATH");
-    failed |= expect_contains("reqshim_iface", iface,
                               "SSU_IOC_GET_VERSION");
-    failed |= expect_contains("reqshim_main", main, "ssu/ctl");
+    failed |= expect_contains("reqshim_main", main, "ssu-ctl");
+    failed |= expect_not_contains("reqshim_main", main, "ssu/ctl");
     failed |= expect_contains("reqshim_iface", iface,
                               "SSU_IOC_LOGDEV_CREATE");
     failed |= expect_contains("reqshim_iface", iface,
@@ -98,6 +97,8 @@ int main(int argc, char **argv)
                               "logical_offset");
     failed |= expect_contains("lbc_mock plugin", lbc_mock,
                               "phys_sector");
+    failed |= expect_not_contains("lbc_mock plugin", lbc_mock,
+                                  "/dev/ssu/ctl");
 
     return failed == 0 ? 0 : 1;
 }

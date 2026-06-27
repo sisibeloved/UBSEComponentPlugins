@@ -61,7 +61,6 @@ while [ "\$#" -gt 0 ]; do
 done
 
 if [ "\$sample" = "./sample_create_attach" ]; then
-    test "\$nsze" = "1048576"
     nsid=\$(next_nsid)
     : > "$dev_dir/nvme1n\$nsid"
     mkdir -p "$configfs_dir/\$subnqn/namespaces/\$nsid"
@@ -162,6 +161,7 @@ grep -q "config file loaded: $config_file" "$log_file"
 grep -q "config path=$config_file prefix=$prefix" "$log_file"
 grep -q 'run cwd=' "$log_file"
 grep -q -- '--nsze 1048576' "$log_file"
+grep -q -- '--nsze 8' "$log_file"
 grep -q -- '--nsid 1' "$log_file"
 grep -q 'target ready subnqn=nqn.2025-01.io.ssu:m0 port=4420' "$log_file"
 grep -q 'create_ns success allocate_id=alloc-0 ns_id=1' "$log_file"
@@ -180,7 +180,7 @@ SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
     --host local \
     --out "$aid_file"
 named=$(cat "$aid_file")
-test "$named" = "data-a"
+test "$named" = "alloc-2"
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
     --size 8192 \
@@ -191,10 +191,10 @@ SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
     --share exclusive \
     --host local \
     --out "$aid_file"
-test "$(cat "$aid_file")" = "data-a"
+test "$(cat "$aid_file")" = "alloc-2"
 
 alloc_rows=$(SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation |
-    grep -c '^data-a[[:space:]]')
+    grep -c '^alloc-2[[:space:]]')
 test "$alloc_rows" = "2"
 
 if SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
@@ -211,7 +211,35 @@ fi
 
 result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$named")
 dev=$(printf '%s\n' "$result" | sed -n '1p')
-test "$dev" = "/dev/ssu/ssu2"
+test "$dev" = "/dev/ssu/data-a"
+
+SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
+    --size 12288 \
+    --name data-b \
+    --user user-lbc \
+    --physical-disks 3 \
+    --aggregate \
+    --share exclusive \
+    --host local \
+    --out "$aid_file"
+second_named=$(cat "$aid_file")
+test "$second_named" = "alloc-3"
+
+second_result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$second_named")
+second_dev=$(printf '%s\n' "$second_result" | sed -n '1p')
+test "$second_dev" = "/dev/ssu/data-b"
+printf '%s\n' "$second_result" | grep -Eq '^physical 0 lbc-mock-ssu0 [0-9]+ 0 4096 lba=8$'
+printf '%s\n' "$second_result" | grep -Eq '^physical 1 lbc-mock-ssu1 [0-9]+ 4096 4096 lba=8$'
+printf '%s\n' "$second_result" | grep -Eq '^physical 2 lbc-mock-ssu2 [0-9]+ 8192 4096 lba=0$'
+SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$second_dev"
+
+SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
+    grep -q "^$dev[[:space:]]\\+local[[:space:]]\\+$named"
+SSU_MGR_SOCKET="$socket" "$ubsectl" unmount --dev "$dev"
 SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"
 test ! -e "$dev_dir/nvme1n1"
 test ! -e "$dev_dir/nvme1n2"
+test ! -e "$dev_dir/nvme1n3"
+test ! -e "$dev_dir/nvme1n4"
+test ! -e "$dev_dir/nvme1n5"

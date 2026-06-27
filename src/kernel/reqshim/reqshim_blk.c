@@ -181,11 +181,30 @@ bool ssu_reqshim_logdev_exists(__u32 minor)
     return exists;
 }
 
+static bool ssu_reqshim_disk_name_char_is_valid(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_' || c == '-' ||
+           c == '.' || c == ':';
+}
+
 static int ssu_reqshim_validate_logdev_req(const struct ssu_logdev_req *req)
 {
+    size_t name_len;
+    size_t i;
+
     if (!req || req->minor >= SSU_REQSHIM_MAX_LOGDEVS ||
         req->capacity_sectors == 0 || req->logical_block_size == 0)
         return -EINVAL;
+
+    name_len = strnlen(req->disk_name, sizeof(req->disk_name));
+    if (name_len == 0 || name_len >= sizeof(req->disk_name) ||
+        name_len + strlen("ssu/") >= DISK_NAME_LEN)
+        return -EINVAL;
+    for (i = 0; i < name_len; i++) {
+        if (!ssu_reqshim_disk_name_char_is_valid(req->disk_name[i]))
+            return -EINVAL;
+    }
 
     if (req->logical_block_size < SSU_REQSHIM_SECTOR_SIZE ||
         !is_power_of_2(req->logical_block_size))
@@ -239,7 +258,7 @@ int ssu_reqshim_logdev_create(const struct ssu_logdev_req *req)
     disk->minors = 1;
     disk->fops = &ssu_reqshim_bdev_ops;
     disk->private_data = slot;
-    snprintf(disk->disk_name, DISK_NAME_LEN, "ssu/ssu%u", req->minor);
+    snprintf(disk->disk_name, DISK_NAME_LEN, "ssu/%s", req->disk_name);
     blk_queue_logical_block_size(disk->queue, req->logical_block_size);
     set_capacity(disk, req->capacity_sectors);
 

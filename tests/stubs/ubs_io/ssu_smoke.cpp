@@ -500,7 +500,7 @@ static int run_sdk_flow(const smoke_options_t *opts)
     mount_req.host_id = opts->host_id;
     if (opts->do_mount) {
         if (!allocated || opts->logical_dev == NULL) {
-            fputs("--mount requires --alloc and --dev /dev/ssu/ssuN\n",
+            fputs("--mount requires --alloc and --dev /dev/ssu/ssuN|/dev/ssu/NAME\n",
                   stderr);
             goto cleanup;
         }
@@ -581,9 +581,9 @@ static int parse_u64(const char *s, uint64_t *out)
 static void usage(void)
 {
     fprintf(stderr,
-            "usage: ssu_smoke /dev/ssu/ssuN [--bytes N]\n"
-            "       ssu_smoke /dev/ssu/ssuN [--bytes N] [--write-only|--read-only]\n"
-            "       ssu_smoke --alloc --size BYTES --stripe --mount --dev /dev/ssu/ssuN --io --pattern verify --unmount --release\n");
+            "usage: ssu_smoke /dev/ssu/ssuN|/dev/ssu/NAME [--bytes N]\n"
+            "       ssu_smoke /dev/ssu/ssuN|/dev/ssu/NAME [--bytes N] [--write-only|--read-only]\n"
+            "       ssu_smoke --alloc --size BYTES --stripe --mount --dev /dev/ssu/ssuN|/dev/ssu/NAME --io --pattern verify --unmount --release\n");
 }
 
 int main(int argc, char **argv)

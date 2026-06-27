@@ -158,7 +158,7 @@ static int allocation_name_is_valid(const char *name)
     }
 
     len = strlen(name);
-    if (len >= sizeof(allocations[0].info.allocate_id)) {
+    if (len > SSU_API_MAX_DISK_NAME_LEN) {
         return 0;
     }
 
@@ -265,7 +265,7 @@ static controller_logdev_t *find_logdev_by_dev(const char *logical_dev)
     return NULL;
 }
 
-static uint32_t find_allocation_rows(
+static uint32_t find_allocation_rows_by_id(
     const char *allocate_id,
     controller_allocation_t **out,
     uint32_t max_count)
@@ -292,9 +292,41 @@ static uint32_t find_allocation_rows(
     return count;
 }
 
+static uint32_t find_allocation_rows_by_disk_name(
+    const char *disk_name,
+    controller_allocation_t **out,
+    uint32_t max_count)
+{
+    uint32_t count = 0;
+    uint32_t i;
+
+    if (is_empty_string(disk_name)) {
+        return 0;
+    }
+
+    for (i = 0; i < SSU_CONTROLLER_MAX_ALLOCATIONS; i++) {
+        if (!allocations[i].active ||
+            strcmp(allocations[i].info.disk_name, disk_name) != 0) {
+            continue;
+        }
+
+        if (out != NULL && count < max_count) {
+            out[count] = &allocations[i];
+        }
+        count++;
+    }
+
+    return count;
+}
+
 static int allocation_id_is_active(const char *allocate_id)
 {
-    return find_allocation_rows(allocate_id, NULL, 0) > 0;
+    return find_allocation_rows_by_id(allocate_id, NULL, 0) > 0;
+}
+
+static int disk_name_is_active(const char *disk_name)
+{
+    return find_allocation_rows_by_disk_name(disk_name, NULL, 0) > 0;
 }
 
 static int allocation_has_logdev(const char *allocate_id)
@@ -483,7 +515,7 @@ ssu_err_t ssu_controller_query_pool(ssu_resource_info_t *out,
 
 static ssu_err_t copy_existing_allocation(
     const ssu_alloc_req_t *req,
-    const char *allocate_id,
+    const char *disk_name,
     ssu_alloc_result_t *out,
     ssu_alloc_extent_t *out_extents,
     uint32_t *inout_extent_count)
@@ -495,8 +527,8 @@ static ssu_err_t copy_existing_allocation(
     uint32_t i;
 
     memset(rows, 0, sizeof(rows));
-    extent_count = find_allocation_rows(allocate_id, rows,
-                                        SSU_CONTROLLER_MAX_ALLOCATIONS);
+    extent_count = find_allocation_rows_by_disk_name(
+        disk_name, rows, SSU_CONTROLLER_MAX_ALLOCATIONS);
     if (extent_count == 0) {
         return SSU_ERR_NOT_FOUND;
     }
@@ -543,7 +575,8 @@ static ssu_err_t copy_existing_allocation(
         out_extents[i].length = rows[i]->info.length;
     }
 
-    copy_cstr(out->allocate_id, sizeof(out->allocate_id), allocate_id);
+    copy_cstr(out->allocate_id, sizeof(out->allocate_id),
+              rows[0]->info.allocate_id);
     out->logical_size_bytes = total_size;
     out->extent_count = extent_count;
     *inout_extent_count = extent_count;
@@ -595,15 +628,14 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
     }
 
     if (named_allocation) {
-        copy_cstr(allocate_id, sizeof(allocate_id), req->disk_name);
-        if (allocation_id_is_active(allocate_id)) {
-            return copy_existing_allocation(req, allocate_id, out,
+        if (disk_name_is_active(req->disk_name)) {
+            return copy_existing_allocation(req, req->disk_name, out,
                                             out_extents,
                                             inout_extent_count);
         }
-    } else {
-        next_auto_allocate_id(allocate_id, sizeof(allocate_id));
     }
+
+    next_auto_allocate_id(allocate_id, sizeof(allocate_id));
 
     extent_count = online_pool_indexes(pool_indexes);
     if (extent_count == 0) {
@@ -679,6 +711,8 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
         slot->active = 1;
         copy_cstr(slot->info.allocate_id, sizeof(slot->info.allocate_id),
                   allocate_id);
+        copy_cstr(slot->info.disk_name, sizeof(slot->info.disk_name),
+                  req->disk_name);
         copy_cstr(slot->info.tenant, sizeof(slot->info.tenant), req->tenant);
         copy_cstr(slot->host_key, sizeof(slot->host_key), host_key);
         slot->info.policy = req->reliability;
@@ -710,9 +744,7 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
     out->logical_size_bytes = req->size_bytes;
     out->extent_count = extent_count;
     *inout_extent_count = extent_count;
-    if (!named_allocation) {
-        next_allocation_id++;
-    }
+    next_allocation_id++;
     return SSU_OK;
 
 rollback:

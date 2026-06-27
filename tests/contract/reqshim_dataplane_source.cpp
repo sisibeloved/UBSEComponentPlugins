@@ -66,7 +66,7 @@ int main(int argc, char **argv)
     failed |= expect_contains("reqshim_main", main, "ssu_reqshim_blk_init");
     failed |= expect_contains("reqshim_main", main, "ssu_reqshim_blk_exit");
     failed |= expect_contains("reqshim_blk", blk, "register_blkdev");
-    failed |= expect_contains("reqshim_blk", blk, "\"ssu/ssu%u\"");
+    failed |= expect_contains("reqshim_blk", blk, "\"ssu/%s\"");
     failed |= expect_contains("reqshim_blk", blk, "blk_mq_ops");
     failed |= expect_contains("reqshim_blk", blk, "queue_rq");
     failed |= expect_contains("reqshim_blk", blk, "blk_mq_alloc_disk");

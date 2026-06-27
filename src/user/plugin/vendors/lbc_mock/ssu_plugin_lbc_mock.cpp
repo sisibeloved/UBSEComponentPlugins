@@ -19,9 +19,9 @@
 
 #define LBC_MOCK_MAX_NAMESPACES 32U
 #define LBC_MOCK_MAX_MOUNTS 32U
-#define LBC_MOCK_NSZE 1048576ULL
+#define LBC_MOCK_RESOURCE_NSZE 1048576ULL
 #define LBC_MOCK_SECTOR_SIZE 512ULL
-#define LBC_MOCK_TOTAL_BYTES (LBC_MOCK_NSZE * LBC_MOCK_SECTOR_SIZE)
+#define LBC_MOCK_TOTAL_BYTES (LBC_MOCK_RESOURCE_NSZE * LBC_MOCK_SECTOR_SIZE)
 #define LBC_MOCK_SUBNQN_MAX 31U
 #define LBC_MOCK_DEFAULT_SSU_COUNT 3U
 #define LBC_MOCK_DEFAULT_CONFIG_PATH "/etc/ubse/ssu_lbc_mock.conf"
@@ -74,6 +74,16 @@ static int config_loaded;
 static int is_empty_string(const char *s)
 {
     return s == NULL || s[0] == '\0';
+}
+
+static uint64_t length_to_nsze(uint64_t length)
+{
+    if (length == 0 ||
+        length > UINT64_MAX - (LBC_MOCK_SECTOR_SIZE - 1ULL)) {
+        return 0;
+    }
+
+    return (length + LBC_MOCK_SECTOR_SIZE - 1ULL) / LBC_MOCK_SECTOR_SIZE;
 }
 
 static void lbc_mock_log(const char *fmt, ...)
@@ -816,12 +826,14 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
     };
     ssu_err_t err;
     uint32_t i;
+    uint64_t nsze_value;
 
     ensure_config_loaded();
 
     if (extent_req == NULL || out_ns_id == NULL || n == 0 ||
         out_phys_sector == NULL || is_empty_string(extent_req->allocate_id) ||
-        is_empty_string(extent_req->ssu_id)) {
+        is_empty_string(extent_req->ssu_id) ||
+        extent_req->length == 0) {
         lbc_mock_log("create_ns failed: invalid arguments req=%p out_ns_id=%p n=%zu out_phys_sector=%p",
                      (const void *)extent_req, (void *)out_ns_id, n,
                      (void *)out_phys_sector);
@@ -873,14 +885,21 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
         return err;
     }
 
+    nsze_value = length_to_nsze(extent_req->length);
+    if (nsze_value == 0) {
+        lbc_mock_log("create_ns failed: invalid length allocate_id=%s length=%llu",
+                     extent_req->allocate_id,
+                     (unsigned long long)extent_req->length);
+        return SSU_ERR_INVALID;
+    }
+
     if (access(lbc_config.dev_dir, R_OK | X_OK) != 0) {
         lbc_mock_log("create_ns warning: cannot scan dev_dir before create dev_dir=%s errno=%d",
                      lbc_config.dev_dir, errno);
     }
     before = scan_nvme_namespaces();
     snprintf(port, sizeof(port), "%u", (unsigned int)lbc_config.port);
-    snprintf(nsze, sizeof(nsze), "%llu",
-             (unsigned long long)LBC_MOCK_NSZE);
+    snprintf(nsze, sizeof(nsze), "%llu", (unsigned long long)nsze_value);
     err = run_command_in_prefix(argv);
     if (err != SSU_OK) {
         lbc_mock_log("create_ns failed: create_attach command failed allocate_id=%s err=%d",
@@ -911,11 +930,13 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
     slot->phys_sector = 0;
 
     copy_cstr(out_ns_id, n, ns_id);
-    *out_phys_sector = 0;
+    *out_phys_sector = extent_req->phys_offset_hint;
     next_nsid++;
-    lbc_mock_log("create_ns success allocate_id=%s ns_id=%s dev_path=%s length=%llu",
+    lbc_mock_log("create_ns success allocate_id=%s ns_id=%s dev_path=%s length=%llu lba=%llu nsze=%llu",
                  extent_req->allocate_id, ns_id, dev_path,
-                 (unsigned long long)extent_req->length);
+                 (unsigned long long)extent_req->length,
+                 (unsigned long long)extent_req->phys_offset_hint,
+                 (unsigned long long)nsze_value);
     return SSU_OK;
 }
 
@@ -1030,10 +1051,10 @@ static ssu_err_t lbc_mock_mount(const char *allocate_id, const char *host_id,
         return err;
     }
 
-    err = ssu_reqshim_mount_logdev(logical_dev, maps, map_count,
-                                   lbc_mock_reqshim_allow_missing(),
-                                   lbc_mock_reqshim_log, NULL,
-                                   NULL, NULL);
+    err = ssu_reqshim_mount_logdev_for_allocate(
+        logical_dev, allocate_id, maps, map_count,
+        lbc_mock_reqshim_allow_missing(),
+        lbc_mock_reqshim_log, NULL, NULL, NULL);
     if (err != SSU_OK) {
         lbc_mock_log("mount failed: ReqShim mount failed allocate_id=%s logical_dev=%s err=%d",
                      allocate_id, logical_dev, err);
@@ -1093,10 +1114,10 @@ static ssu_err_t lbc_mock_unmount(const char *logical_dev)
         return err;
     }
 
-    err = ssu_reqshim_unmount_logdev(logical_dev, maps, map_count,
-                                     lbc_mock_reqshim_allow_missing(),
-                                     lbc_mock_reqshim_log, NULL,
-                                     NULL, NULL);
+    err = ssu_reqshim_unmount_logdev_for_allocate(
+        logical_dev, mount->allocate_id, maps, map_count,
+        lbc_mock_reqshim_allow_missing(),
+        lbc_mock_reqshim_log, NULL, NULL, NULL);
     if (err != SSU_OK) {
         lbc_mock_log("unmount failed: ReqShim unmount failed allocate_id=%s logical_dev=%s err=%d",
                      mount->allocate_id, logical_dev, err);

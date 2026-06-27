@@ -12,13 +12,15 @@ typedef uint64_t __u64;
 #endif
 
 #define SSU_IOCTL_MAGIC 'S'
-#define SSU_REQSHIM_UAPI_VERSION 1U
+#define SSU_REQSHIM_UAPI_VERSION 2U
+#define SSU_REQSHIM_DISK_NAME_LEN 32U
 
 struct ssu_logdev_req {
     __u32 minor;
     __u64 capacity_sectors;
     __u32 logical_block_size;
     __u32 flags;
+    char disk_name[SSU_REQSHIM_DISK_NAME_LEN];
 };
 
 struct ssu_map_entry {

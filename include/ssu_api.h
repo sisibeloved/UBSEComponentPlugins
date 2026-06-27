@@ -8,6 +8,8 @@
 extern "C" {
 #endif
 
+#define SSU_API_MAX_DISK_NAME_LEN 27U /* Max visible name in /dev/ssu/<name>. */
+
 typedef enum {
     SSU_RELIABILITY_STRIPE = 0,
     SSU_RELIABILITY_EC = 1,
@@ -84,6 +86,7 @@ typedef struct {
 
 typedef struct {
     char allocate_id[64];
+    char disk_name[64];
     char tenant[64];
     ssu_reliability_t policy;
     ssu_share_type_t share_type;
@@ -209,17 +212,16 @@ ssu_err_t ssu_resource_query(const ssu_query_req_t *req,
 ssu_err_t ssu_api_allocate(const ssu_api_allocate_req_t *req,
                            ssu_api_allocate_resp_t *out);
 
-/* Call after dlopen/dlsym before the first SDK operation. Passing NULL uses
- * the default SDK configuration. Existing direct-link callers are still lazily
- * initialized for compatibility.
+/* Server-side API used inside ssu-mgr. Upstream applications should dlopen
+ * libubse_ssu_sdk.so and use ubse_ssu_sdk.h instead.
  */
 ssu_err_t ssu_api_init(const ssu_api_init_options_t *opts);
 
-/* Release SDK process-local caches before dlclose. */
+/* Release server-side API process-local caches before dlclose. */
 void ssu_api_fini(void);
 
-/* dlopen users only need to dlsym this single entry point. The returned
- * function table is process-static and valid until dlclose.
+/* Server-side dlopen users only need to dlsym this single entry point. The
+ * returned function table is process-static and valid until dlclose.
  */
 const ssu_api_ops_t *ssu_api_entry(void);
 

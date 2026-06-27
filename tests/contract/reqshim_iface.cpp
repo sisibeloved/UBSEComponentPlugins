@@ -159,6 +159,7 @@ static int run_mount_builds_expected_ioctls(void)
     if (fake.calls[1].logdev.minor != 3 ||
         fake.calls[1].logdev.capacity_sectors != 16 ||
         fake.calls[1].logdev.logical_block_size != 512 ||
+        strcmp(fake.calls[1].logdev.disk_name, "ssu3") != 0 ||
         fake.calls[2].map.logical_minor != 3 ||
         fake.calls[2].map.logical_sector != 0 ||
         fake.calls[2].map.length_sectors != 8 ||
@@ -169,6 +170,70 @@ static int run_mount_builds_expected_ioctls(void)
         fake.calls[3].map.nsid != 2 ||
         fake.calls[3].map.phys_sector != 16) {
         fputs("mount built unexpected ReqShim ioctl payloads\n", stderr);
+        failed = 1;
+    }
+
+    return failed;
+}
+
+static int run_named_mount_uses_allocate_minor_and_disk_name(void)
+{
+    const ssu_reqshim_sys_ops_t ops = {
+        fake_open,
+        fake_ioctl,
+        fake_close,
+    };
+    ssu_reqshim_map_spec_t map = {};
+    int failed = 0;
+
+    snprintf(map.phys_dev, sizeof(map.phys_dev), "/dev/nvme1n1");
+    snprintf(map.ns_id, sizeof(map.ns_id), "1");
+    map.length = 4096;
+
+    reset_fake();
+    failed |= expect_err("named mount",
+                         ssu_reqshim_mount_logdev_for_allocate(
+                             "/dev/ssu/data-a", "alloc-7", &map, 1, 0,
+                             fake_log, NULL, &ops, "/tmp/ssu-ctl"),
+                         SSU_OK);
+    failed |= fake.open_count != 1 || fake.close_count != 1;
+    failed |= fake.call_count != 3;
+    failed |= expect_request(0, SSU_IOC_GET_VERSION);
+    failed |= expect_request(1, SSU_IOC_LOGDEV_CREATE);
+    failed |= expect_request(2, SSU_IOC_MAP_ADD);
+
+    if (fake.calls[1].logdev.minor != 7 ||
+        strcmp(fake.calls[1].logdev.disk_name, "data-a") != 0 ||
+        fake.calls[2].map.logical_minor != 7) {
+        fputs("named mount should use alloc-N minor and named disk path\n",
+              stderr);
+        failed = 1;
+    }
+
+    reset_fake();
+    failed |= expect_err("named unmount",
+                         ssu_reqshim_unmount_logdev_for_allocate(
+                             "/dev/ssu/data-a", "alloc-7", &map, 1, 0,
+                             fake_log, NULL, &ops, "/tmp/ssu-ctl"),
+                         SSU_OK);
+    failed |= expect_request(1, SSU_IOC_MAP_DEL);
+    failed |= expect_request(2, SSU_IOC_LOGDEV_DESTROY);
+
+    if (fake.calls[1].map.logical_minor != 7 ||
+        fake.calls[2].logdev.minor != 7) {
+        fputs("named unmount should use alloc-N minor\n", stderr);
+        failed = 1;
+    }
+
+    reset_fake();
+    failed |= expect_err("too long named mount",
+                         ssu_reqshim_mount_logdev_for_allocate(
+                             "/dev/ssu/abcdefghijklmnopqrstuvwxyz12",
+                             "alloc-7", &map, 1, 0, fake_log, NULL, &ops,
+                             "/tmp/ssu-ctl"),
+                         SSU_ERR_INVALID);
+    if (fake.open_count != 0) {
+        fputs("invalid named mount should not open ReqShim ctl\n", stderr);
         failed = 1;
     }
 
@@ -275,6 +340,14 @@ static int run_missing_ctl_policy(void)
                                                   "/missing/ssu-ctl"),
                          SSU_ERR_KERNEL);
 
+    reset_fake();
+    failed |= expect_err("default ctl path",
+                         ssu_reqshim_mount_logdev("/dev/ssu0", &map, 1, 1,
+                                                  fake_log, NULL, &ops,
+                                                  NULL),
+                         SSU_OK);
+    failed |= strcmp(fake.opened_path, "/dev/ssu-ctl") != 0;
+
     return failed;
 }
 
@@ -367,6 +440,7 @@ int main(void)
 
     failed |= run_minor_parser();
     failed |= run_mount_builds_expected_ioctls();
+    failed |= run_named_mount_uses_allocate_minor_and_disk_name();
     failed |= run_unmount_builds_expected_ioctls();
     failed |= run_unmount_without_maps_destroys_logdev();
     failed |= run_missing_ctl_policy();

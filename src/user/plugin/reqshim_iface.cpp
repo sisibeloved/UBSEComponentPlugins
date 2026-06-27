@@ -159,6 +159,72 @@ ssu_err_t ssu_reqshim_parse_logical_minor(const char *logical_dev,
     return SSU_OK;
 }
 
+static ssu_err_t parse_allocate_minor(const char *allocate_id,
+                                      uint32_t *out_minor)
+{
+    const char *prefix = "alloc-";
+    const char *digits;
+    char *end = NULL;
+    unsigned long value;
+
+    if (is_empty_string(allocate_id) || out_minor == NULL ||
+        strncmp(allocate_id, prefix, strlen(prefix)) != 0) {
+        return SSU_ERR_INVALID;
+    }
+
+    digits = allocate_id + strlen(prefix);
+    errno = 0;
+    value = strtoul(digits, &end, 10);
+    if (errno != 0 || end == digits || *end != '\0' ||
+        value > UINT32_MAX) {
+        return SSU_ERR_INVALID;
+    }
+
+    *out_minor = (uint32_t)value;
+    return SSU_OK;
+}
+
+static int logical_disk_name_char_is_valid(char c)
+{
+    return (c >= 'a' && c <= 'z') ||
+           (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') ||
+           c == '_' || c == '-' || c == '.' || c == ':';
+}
+
+static ssu_err_t copy_logical_disk_name(const char *logical_dev,
+                                        char *out,
+                                        size_t n)
+{
+    const char *base;
+    size_t len;
+    size_t i;
+
+    if (is_empty_string(logical_dev) || out == NULL || n == 0) {
+        return SSU_ERR_INVALID;
+    }
+
+    base = strrchr(logical_dev, '/');
+    base = base == NULL ? logical_dev : base + 1;
+    if (is_empty_string(base)) {
+        return SSU_ERR_INVALID;
+    }
+
+    len = strlen(base);
+    if (len >= n || len > SSU_API_MAX_DISK_NAME_LEN) {
+        return SSU_ERR_INVALID;
+    }
+
+    for (i = 0; i < len; i++) {
+        if (!logical_disk_name_char_is_valid(base[i])) {
+            return SSU_ERR_INVALID;
+        }
+    }
+
+    snprintf(out, n, "%s", base);
+    return SSU_OK;
+}
+
 static ssu_err_t build_map_entry(const ssu_reqshim_map_spec_t *spec,
                                  uint32_t minor,
                                  struct ssu_map_entry *entry)
@@ -241,8 +307,6 @@ static ssu_err_t open_reqshim_ctl(const ssu_reqshim_sys_ops_t *ops,
 {
     const char *path = is_empty_string(ctl_path) ?
                            SSU_REQSHIM_DEFAULT_CTL_PATH : ctl_path;
-    const char *fallback_path = is_empty_string(ctl_path) ?
-                                   SSU_REQSHIM_LEGACY_CTL_PATH : NULL;
     int fd;
     int saved_errno;
 
@@ -257,21 +321,6 @@ static ssu_err_t open_reqshim_ctl(const ssu_reqshim_sys_ops_t *ops,
     }
 
     saved_errno = errno;
-    if (fallback_path != NULL &&
-        (saved_errno == ENOENT || saved_errno == ENODEV)) {
-        errno = 0;
-        fd = ops->open_fn(fallback_path, O_RDWR | O_CLOEXEC);
-        if (fd >= 0) {
-            reqshim_log(log_fn, log_ctx,
-                        "ReqShim control device fallback ctl=%s legacy_ctl=%s",
-                        path, fallback_path);
-            *out_fd = fd;
-            return SSU_OK;
-        }
-        saved_errno = errno;
-        path = fallback_path;
-    }
-
     if (allow_missing_ctl &&
         (saved_errno == ENOENT || saved_errno == ENODEV)) {
         reqshim_log(log_fn, log_ctx,
@@ -331,8 +380,9 @@ static ssu_err_t check_version(const ssu_reqshim_sys_ops_t *ops,
     return SSU_OK;
 }
 
-ssu_err_t ssu_reqshim_mount_logdev(
+static ssu_err_t mount_logdev_with_minor(
     const char *logical_dev,
+    uint32_t minor,
     const ssu_reqshim_map_spec_t *maps,
     uint32_t map_count,
     int allow_missing_ctl,
@@ -345,7 +395,6 @@ ssu_err_t ssu_reqshim_mount_logdev(
     std::vector<struct ssu_map_entry> entries;
     struct ssu_logdev_req logdev_req;
     uint64_t capacity_sectors = 0;
-    uint32_t minor;
     int fd = -1;
     int skipped = 0;
     uint32_t i;
@@ -355,12 +404,17 @@ ssu_err_t ssu_reqshim_mount_logdev(
         return SSU_ERR_INVALID;
     }
 
-    err = ssu_reqshim_parse_logical_minor(logical_dev, &minor);
+    err = build_entries(maps, map_count, minor, &entries, &capacity_sectors);
     if (err != SSU_OK) {
         return err;
     }
 
-    err = build_entries(maps, map_count, minor, &entries, &capacity_sectors);
+    memset(&logdev_req, 0, sizeof(logdev_req));
+    logdev_req.minor = minor;
+    logdev_req.capacity_sectors = capacity_sectors;
+    logdev_req.logical_block_size = SSU_REQSHIM_SECTOR_SIZE;
+    err = copy_logical_disk_name(logical_dev, logdev_req.disk_name,
+                                 sizeof(logdev_req.disk_name));
     if (err != SSU_OK) {
         return err;
     }
@@ -376,11 +430,6 @@ ssu_err_t ssu_reqshim_mount_logdev(
         ops->close_fn(fd);
         return err;
     }
-
-    memset(&logdev_req, 0, sizeof(logdev_req));
-    logdev_req.minor = minor;
-    logdev_req.capacity_sectors = capacity_sectors;
-    logdev_req.logical_block_size = SSU_REQSHIM_SECTOR_SIZE;
 
     err = do_ioctl(ops, fd, SSU_IOC_LOGDEV_CREATE, &logdev_req,
                    "SSU_IOC_LOGDEV_CREATE", log_fn, log_ctx);
@@ -407,13 +456,65 @@ ssu_err_t ssu_reqshim_mount_logdev(
 
     ops->close_fn(fd);
     reqshim_log(log_fn, log_ctx,
-                "ReqShim mount success logical_dev=%s minor=%u maps=%u",
-                logical_dev, minor, map_count);
+                "ReqShim mount success logical_dev=%s minor=%u maps=%u capacity_sectors=%llu",
+                logical_dev, minor, map_count,
+                (unsigned long long)capacity_sectors);
     return SSU_OK;
 }
 
-ssu_err_t ssu_reqshim_unmount_logdev(
+ssu_err_t ssu_reqshim_mount_logdev_for_allocate(
     const char *logical_dev,
+    const char *allocate_id,
+    const ssu_reqshim_map_spec_t *maps,
+    uint32_t map_count,
+    int allow_missing_ctl,
+    ssu_reqshim_log_fn log_fn,
+    void *log_ctx,
+    const ssu_reqshim_sys_ops_t *ops,
+    const char *ctl_path)
+{
+    uint32_t minor;
+    ssu_err_t err;
+
+    err = parse_allocate_minor(allocate_id, &minor);
+    if (err != SSU_OK) {
+        err = ssu_reqshim_parse_logical_minor(logical_dev, &minor);
+        if (err != SSU_OK) {
+            return err;
+        }
+    }
+
+    return mount_logdev_with_minor(logical_dev, minor, maps, map_count,
+                                   allow_missing_ctl, log_fn, log_ctx,
+                                   ops, ctl_path);
+}
+
+ssu_err_t ssu_reqshim_mount_logdev(
+    const char *logical_dev,
+    const ssu_reqshim_map_spec_t *maps,
+    uint32_t map_count,
+    int allow_missing_ctl,
+    ssu_reqshim_log_fn log_fn,
+    void *log_ctx,
+    const ssu_reqshim_sys_ops_t *ops,
+    const char *ctl_path)
+{
+    uint32_t minor;
+    ssu_err_t err;
+
+    err = ssu_reqshim_parse_logical_minor(logical_dev, &minor);
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    return mount_logdev_with_minor(logical_dev, minor, maps, map_count,
+                                   allow_missing_ctl, log_fn, log_ctx,
+                                   ops, ctl_path);
+}
+
+static ssu_err_t unmount_logdev_with_minor(
+    const char *logical_dev,
+    uint32_t minor,
     const ssu_reqshim_map_spec_t *maps,
     uint32_t map_count,
     int allow_missing_ctl,
@@ -426,7 +527,6 @@ ssu_err_t ssu_reqshim_unmount_logdev(
     std::vector<struct ssu_map_entry> entries;
     struct ssu_logdev_req logdev_req;
     uint64_t capacity_sectors = 0;
-    uint32_t minor;
     int fd = -1;
     int skipped = 0;
     uint32_t i;
@@ -434,11 +534,6 @@ ssu_err_t ssu_reqshim_unmount_logdev(
 
     if (ops == NULL) {
         return SSU_ERR_INVALID;
-    }
-
-    err = ssu_reqshim_parse_logical_minor(logical_dev, &minor);
-    if (err != SSU_OK) {
-        return err;
     }
 
     if (map_count > 0) {
@@ -482,4 +577,54 @@ ssu_err_t ssu_reqshim_unmount_logdev(
                 "ReqShim unmount success logical_dev=%s minor=%u maps=%u",
                 logical_dev, minor, map_count);
     return SSU_OK;
+}
+
+ssu_err_t ssu_reqshim_unmount_logdev_for_allocate(
+    const char *logical_dev,
+    const char *allocate_id,
+    const ssu_reqshim_map_spec_t *maps,
+    uint32_t map_count,
+    int allow_missing_ctl,
+    ssu_reqshim_log_fn log_fn,
+    void *log_ctx,
+    const ssu_reqshim_sys_ops_t *ops,
+    const char *ctl_path)
+{
+    uint32_t minor;
+    ssu_err_t err;
+
+    err = parse_allocate_minor(allocate_id, &minor);
+    if (err != SSU_OK) {
+        err = ssu_reqshim_parse_logical_minor(logical_dev, &minor);
+        if (err != SSU_OK) {
+            return err;
+        }
+    }
+
+    return unmount_logdev_with_minor(logical_dev, minor, maps, map_count,
+                                     allow_missing_ctl, log_fn, log_ctx,
+                                     ops, ctl_path);
+}
+
+ssu_err_t ssu_reqshim_unmount_logdev(
+    const char *logical_dev,
+    const ssu_reqshim_map_spec_t *maps,
+    uint32_t map_count,
+    int allow_missing_ctl,
+    ssu_reqshim_log_fn log_fn,
+    void *log_ctx,
+    const ssu_reqshim_sys_ops_t *ops,
+    const char *ctl_path)
+{
+    uint32_t minor;
+    ssu_err_t err;
+
+    err = ssu_reqshim_parse_logical_minor(logical_dev, &minor);
+    if (err != SSU_OK) {
+        return err;
+    }
+
+    return unmount_logdev_with_minor(logical_dev, minor, maps, map_count,
+                                     allow_missing_ctl, log_fn, log_ctx,
+                                     ops, ctl_path);
 }

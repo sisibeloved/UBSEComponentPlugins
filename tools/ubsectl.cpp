@@ -1,6 +1,4 @@
-#include "ssu_api.h"
-#include "ssu_controller.h"
-#include "ssu_plugin.h"
+#include "ubse_ssu_sdk.h"
 
 #include <errno.h>
 #include <stdint.h>
@@ -20,15 +18,15 @@ static void usage(void)
     puts("usage: ubsectl <allocate|free|list|allocate-result-get|mount|unmount>");
     puts("       ubsectl allocate --size BYTES [--name NAME] [--user USER] [--physical-disks N] [--aggregate|--no-aggregate] [--share exclusive|shared] [--host HOST] [--out FILE]");
     puts("       ubsectl allocate-result-get --request-id ID [--out FILE]");
-    puts("       ubsectl free --dev /dev/ssu/ssuN");
+    puts("       ubsectl free --dev /dev/ssu/ssuN|/dev/ssu/NAME");
     puts("       ubsectl list");
     puts("");
     puts("compat:");
     puts("       ubsectl <alloc|mount|unmount|release|query>");
     puts("       ubsectl alloc --size BYTES --stripe|--replica N [--out FILE]");
-    puts("       ubsectl mount --aid AID --host HOST --dev /dev/ssu/ssuN");
-    puts("       ubsectl mount --dev /dev/ssu/ssuN --host HOST");
-    puts("       ubsectl unmount --dev /dev/ssu/ssuN");
+    puts("       ubsectl mount --aid AID --host HOST --dev /dev/ssu/ssuN|/dev/ssu/NAME");
+    puts("       ubsectl mount --dev /dev/ssu/ssuN|/dev/ssu/NAME --host HOST");
+    puts("       ubsectl unmount --dev /dev/ssu/ssuN|/dev/ssu/NAME");
     puts("       ubsectl release --aid AID");
     puts("       ubsectl query --type pool|allocation|logdev");
 }
@@ -41,17 +39,12 @@ static int is_empty_string(const char *s)
 static const char *manager_socket_path(void)
 {
     const char *path = getenv("SSU_MGR_SOCKET");
-    struct stat st;
 
     if (!is_empty_string(path)) {
         return path;
     }
 
-    if (stat(DEFAULT_MANAGER_SOCKET, &st) == 0 && S_ISFIFO(st.st_mode)) {
-        return DEFAULT_MANAGER_SOCKET;
-    }
-
-    return NULL;
+    return DEFAULT_MANAGER_SOCKET;
 }
 
 static const char *ssu_err_name(ssu_err_t err)
@@ -154,36 +147,6 @@ static int parse_share_type(const char *s, ssu_share_type_t *out)
     }
 
     return 0;
-}
-
-static int build_host_list(char *buf, size_t n,
-                           const char *const *hosts, uint32_t host_count)
-{
-    size_t used = 0;
-    uint32_t i;
-
-    if (buf == NULL || n == 0 || hosts == NULL || host_count == 0) {
-        return 0;
-    }
-
-    buf[0] = '\0';
-    for (i = 0; i < host_count; i++) {
-        int rc;
-
-        if (is_empty_string(hosts[i]) || strchr(hosts[i], ' ') != NULL ||
-            strchr(hosts[i], ',') != NULL) {
-            return 0;
-        }
-
-        rc = snprintf(buf + used, n - used, "%s%s",
-                      i == 0 ? "" : ",", hosts[i]);
-        if (rc < 0 || (size_t)rc >= n - used) {
-            return 0;
-        }
-        used += (size_t)rc;
-    }
-
-    return 1;
 }
 
 static int is_manager_token_safe(const char *s)
@@ -401,173 +364,6 @@ static int parse_query_args(int argc, char **argv, ssu_query_type_t *type)
     return 1;
 }
 
-static int refresh_mock_pool(void)
-{
-    const ssu_plugin_ops_t *plugin = ssu_plugin_entry();
-    ssu_err_t err;
-
-    if (plugin == NULL) {
-        fputs("mock plugin unavailable\n", stderr);
-        return 1;
-    }
-
-    err = ssu_controller_refresh_pool(plugin);
-    if (err != SSU_OK) {
-        print_operation_error("pool refresh", err);
-        return 1;
-    }
-
-    return 0;
-}
-
-static int print_pool(void)
-{
-    ssu_query_req_t req = {};
-    uint32_t count = 0;
-    ssu_resource_info_t *resources;
-    uint32_t i;
-    ssu_err_t err;
-
-    req.type = SSU_QUERY_POOL;
-    err = ssu_resource_query(&req, NULL, sizeof(ssu_resource_info_t),
-                             &count);
-
-    if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
-        print_operation_error("query", err);
-        return 1;
-    }
-
-    if (count == 0) {
-        puts("pool entries: 0");
-        return 0;
-    }
-
-    resources = (ssu_resource_info_t *)calloc(count, sizeof(*resources));
-    if (resources == NULL) {
-        fputs("query failed: out of memory\n", stderr);
-        return 1;
-    }
-
-    err = ssu_resource_query(&req, resources, sizeof(*resources), &count);
-    if (err != SSU_OK) {
-        free(resources);
-        print_operation_error("query", err);
-        return 1;
-    }
-
-    printf("pool entries: %u\n", count);
-    for (i = 0; i < count; i++) {
-        printf("%s %s %s %llu/%llu\n",
-               resources[i].ssu_id,
-               resources[i].host_id,
-               resources[i].state,
-               (unsigned long long)resources[i].used_bytes,
-               (unsigned long long)resources[i].total_bytes);
-    }
-
-    free(resources);
-    return 0;
-}
-
-static int print_allocations(void)
-{
-    ssu_query_req_t req = {};
-    uint32_t count = 0;
-    ssu_allocation_info_t *allocations;
-    uint32_t i;
-    ssu_err_t err;
-
-    req.type = SSU_QUERY_ALLOCATION;
-    err = ssu_resource_query(&req, NULL, sizeof(ssu_allocation_info_t),
-                             &count);
-
-    if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
-        print_operation_error("query", err);
-        return 1;
-    }
-
-    printf("allocation entries: %u\n", count);
-    if (count == 0) {
-        return 0;
-    }
-
-    allocations = (ssu_allocation_info_t *)calloc(count,
-                                                  sizeof(*allocations));
-    if (allocations == NULL) {
-        fputs("query failed: out of memory\n", stderr);
-        return 1;
-    }
-
-    err = ssu_resource_query(&req, allocations, sizeof(*allocations), &count);
-    if (err != SSU_OK) {
-        free(allocations);
-        print_operation_error("query", err);
-        return 1;
-    }
-
-    for (i = 0; i < count; i++) {
-        printf("%s %s %s %s %llu\n",
-               allocations[i].allocate_id,
-               allocations[i].state,
-               allocations[i].ssu_id,
-               allocations[i].ns_id,
-               (unsigned long long)allocations[i].length);
-    }
-
-    free(allocations);
-    return 0;
-}
-
-static int print_logdevs(void)
-{
-    ssu_query_req_t req = {};
-    uint32_t count = 0;
-    ssu_logdev_info_t *logdevs;
-    uint32_t i;
-    ssu_err_t err;
-
-    req.type = SSU_QUERY_LOGDEV;
-    err = ssu_resource_query(&req, NULL, sizeof(ssu_logdev_info_t), &count);
-
-    if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
-        print_operation_error("query", err);
-        return 1;
-    }
-
-    printf("logdev entries: %u\n", count);
-    if (count == 0) {
-        return 0;
-    }
-
-    logdevs = (ssu_logdev_info_t *)calloc(count, sizeof(*logdevs));
-    if (logdevs == NULL) {
-        fputs("query failed: out of memory\n", stderr);
-        return 1;
-    }
-
-    err = ssu_resource_query(&req, logdevs, sizeof(*logdevs), &count);
-    if (err != SSU_OK) {
-        free(logdevs);
-        print_operation_error("query", err);
-        return 1;
-    }
-
-    for (i = 0; i < count; i++) {
-        printf("%s %s %s %llu %llu %s %s %llu\n",
-               logdevs[i].logical_dev,
-               logdevs[i].host_id,
-               logdevs[i].allocate_id,
-               (unsigned long long)logdevs[i].logical_offset,
-               (unsigned long long)logdevs[i].length,
-               logdevs[i].phys_dev,
-               logdevs[i].ns_id,
-               (unsigned long long)logdevs[i].phys_sector);
-    }
-
-    free(logdevs);
-    return 0;
-}
-
 static int cmd_query(int argc, char **argv)
 {
     ssu_query_type_t type;
@@ -579,36 +375,20 @@ static int cmd_query(int argc, char **argv)
         return 1;
     }
 
-    if (manager_socket_path() != NULL) {
-        snprintf(command, sizeof(command), "QUERY %s", query_type_name(type));
-        if (!manager_request(command, response, sizeof(response))) {
-            return 1;
-        }
-        return print_manager_response(response, NULL);
-    }
-
-    if (type == SSU_QUERY_POOL && refresh_mock_pool() != 0) {
+    snprintf(command, sizeof(command), "QUERY %s", query_type_name(type));
+    if (!manager_request(command, response, sizeof(response))) {
         return 1;
     }
-
-    if (type == SSU_QUERY_POOL) {
-        return print_pool();
-    }
-
-    if (type == SSU_QUERY_ALLOCATION) {
-        return print_allocations();
-    }
-
-    if (type == SSU_QUERY_LOGDEV) {
-        return print_logdevs();
-    }
-
-    return 1;
+    return print_manager_response(response, NULL);
 }
 
 static int cmd_list(int argc, char **argv)
 {
-    char response[RESPONSE_SIZE];
+    uint32_t count = 0;
+    uint32_t capacity;
+    ssu_resource_info_t *resources;
+    ssu_err_t err;
+    uint32_t i;
 
     (void)argv;
 
@@ -617,14 +397,43 @@ static int cmd_list(int argc, char **argv)
         return 1;
     }
 
-    if (manager_socket_path() != NULL) {
-        if (!manager_request("LIST", response, sizeof(response))) {
-            return 1;
-        }
-        return print_manager_response(response, NULL);
+    err = ubse_ssu_sdk_list(NULL, &count);
+    if (err != SSU_OK && err != SSU_ERR_BUFFER_TOO_SMALL) {
+        print_operation_error("list", err);
+        return 1;
     }
 
-    return print_pool();
+    if (count == 0) {
+        puts("pool entries: 0");
+        return 0;
+    }
+
+    resources = (ssu_resource_info_t *)calloc(count, sizeof(*resources));
+    if (resources == NULL) {
+        fputs("list failed: out of memory\n", stderr);
+        return 1;
+    }
+
+    capacity = count;
+    err = ubse_ssu_sdk_list(resources, &capacity);
+    if (err != SSU_OK) {
+        free(resources);
+        print_operation_error("list", err);
+        return 1;
+    }
+
+    printf("pool entries: %u\n", capacity);
+    for (i = 0; i < capacity; i++) {
+        printf("%s %s %s %llu/%llu\n",
+               resources[i].ssu_id,
+               resources[i].host_id,
+               resources[i].state,
+               (unsigned long long)resources[i].used_bytes,
+               (unsigned long long)resources[i].total_bytes);
+    }
+
+    free(resources);
+    return 0;
 }
 
 static int write_alloc_output(const char *allocate_id, const char *out_path)
@@ -682,9 +491,6 @@ static int cmd_allocate(int argc, char **argv)
     const char *out_path = NULL;
     const char *user = "default";
     const char *disk_name = NULL;
-    char host_list[256];
-    char command[512];
-    char response[RESPONSE_SIZE];
     int i;
     ssu_err_t err;
 
@@ -788,28 +594,8 @@ static int cmd_allocate(int argc, char **argv)
     req.host_ids = hosts;
     req.host_count = host_count;
 
-    if (manager_socket_path() != NULL) {
-        if (!build_host_list(host_list, sizeof(host_list), hosts,
-                             host_count)) {
-            usage();
-            return 1;
-        }
-        snprintf(command, sizeof(command), "ALLOCATE %llu %d %u %d %s %s %s",
-                 (unsigned long long)req.size_bytes,
-                 (int)req.allocation_type,
-                 req.physical_disk_count,
-                 req.logical_disk_aggregate,
-                 is_empty_string(user) ? "-" : user,
-                 host_list,
-                 is_empty_string(disk_name) ? "-" : disk_name);
-        if (!manager_request(command, response, sizeof(response))) {
-            return 1;
-        }
-        return print_manager_response(response, out_path);
-    }
-
     memset(&out, 0, sizeof(out));
-    err = ssu_api_allocate(&req, &out);
+    err = ubse_ssu_sdk_allocate(&req, &out);
     if (err != SSU_OK) {
         print_operation_error("allocate", err);
         return 1;
@@ -823,8 +609,6 @@ static int cmd_allocate_result_get(int argc, char **argv)
     const char *request_id = NULL;
     const char *out_path = NULL;
     ssu_api_allocate_result_info_t result;
-    char command[128];
-    char response[RESPONSE_SIZE];
     int i;
     ssu_err_t err;
 
@@ -854,17 +638,8 @@ static int cmd_allocate_result_get(int argc, char **argv)
         return 1;
     }
 
-    if (manager_socket_path() != NULL) {
-        snprintf(command, sizeof(command), "ALLOCATE_RESULT %s",
-                 request_id);
-        if (!manager_request(command, response, sizeof(response))) {
-            return 1;
-        }
-        return print_manager_response(response, out_path);
-    }
-
     memset(&result, 0, sizeof(result));
-    err = ssu_api_allocate_result_get(request_id, &result);
+    err = ubse_ssu_sdk_allocate_result_get(request_id, &result);
     if (err != SSU_OK) {
         print_operation_error("allocate-result-get", err);
         if (!is_empty_string(result.error_message)) {
@@ -878,24 +653,18 @@ static int cmd_allocate_result_get(int argc, char **argv)
 
 static int cmd_alloc(int argc, char **argv)
 {
-    ssu_alloc_req_t req = {};
+    uint64_t size_bytes = 0;
+    ssu_reliability_t reliability = SSU_RELIABILITY_STRIPE;
+    uint32_t replica_count = 0;
+    ssu_share_type_t share_type = SSU_SHARE_EXCLUSIVE;
     const char *out_path = NULL;
-    ssu_alloc_result_t out;
-    ssu_alloc_extent_t extents[1];
-    uint32_t extent_count = 1;
     char command[128];
     char response[RESPONSE_SIZE];
     int i;
-    ssu_err_t err;
-
-    req.reliability = SSU_RELIABILITY_STRIPE;
-    req.share_type = SSU_SHARE_EXCLUSIVE;
-    req.map_dir = SSU_MAP_DIR_FORWARD;
-    req.physical_disk_count = 1;
 
     for (i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--size") == 0) {
-            if (i + 1 >= argc || !parse_size(argv[i + 1], &req.size_bytes)) {
+            if (i + 1 >= argc || !parse_size(argv[i + 1], &size_bytes)) {
                 usage();
                 return 1;
             }
@@ -904,7 +673,7 @@ static int cmd_alloc(int argc, char **argv)
         }
 
         if (strcmp(argv[i], "--stripe") == 0) {
-            req.reliability = SSU_RELIABILITY_STRIPE;
+            reliability = SSU_RELIABILITY_STRIPE;
             continue;
         }
 
@@ -913,8 +682,8 @@ static int cmd_alloc(int argc, char **argv)
                 usage();
                 return 1;
             }
-            req.reliability = SSU_RELIABILITY_REPLICA;
-            req.replica_count = (uint32_t)strtoul(argv[i + 1], NULL, 10);
+            reliability = SSU_RELIABILITY_REPLICA;
+            replica_count = (uint32_t)strtoul(argv[i + 1], NULL, 10);
             i++;
             continue;
         }
@@ -924,7 +693,7 @@ static int cmd_alloc(int argc, char **argv)
                 usage();
                 return 1;
             }
-            if (!parse_share_type(argv[i + 1], &req.share_type)) {
+            if (!parse_share_type(argv[i + 1], &share_type)) {
                 usage();
                 return 1;
             }
@@ -945,32 +714,22 @@ static int cmd_alloc(int argc, char **argv)
         return 1;
     }
 
-    if (manager_socket_path() != NULL) {
-        snprintf(command, sizeof(command), "ALLOC %llu %d %u %d",
-                 (unsigned long long)req.size_bytes,
-                 (int)req.reliability,
-                 req.replica_count,
-                 (int)req.share_type);
-        if (!manager_request(command, response, sizeof(response))) {
-            return 1;
-        }
-        return print_manager_response(response, out_path);
-    }
-
-    memset(&out, 0, sizeof(out));
-    memset(extents, 0, sizeof(extents));
-    err = ssu_resource_alloc(&req, &out, extents, &extent_count);
-    if (err != SSU_OK) {
-        print_operation_error("alloc", err);
+    snprintf(command, sizeof(command), "ALLOC %llu %d %u %d",
+             (unsigned long long)size_bytes,
+             (int)reliability,
+             replica_count,
+             (int)share_type);
+    if (!manager_request(command, response, sizeof(response))) {
         return 1;
     }
-
-    return write_alloc_output(out.allocate_id, out_path);
+    return print_manager_response(response, out_path);
 }
 
 static int cmd_mount(int argc, char **argv)
 {
-    ssu_mount_req_t req = {};
+    const char *allocate_id = NULL;
+    const char *host_id = NULL;
+    char logical_dev[64] = {};
     char command[256];
     char response[RESPONSE_SIZE];
     int i;
@@ -978,60 +737,54 @@ static int cmd_mount(int argc, char **argv)
 
     for (i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--aid") == 0 && i + 1 < argc) {
-            req.allocate_id = argv[++i];
+            allocate_id = argv[++i];
             continue;
         }
         if (strcmp(argv[i], "--host") == 0 && i + 1 < argc) {
-            req.host_id = argv[++i];
+            host_id = argv[++i];
             continue;
         }
         if (strcmp(argv[i], "--dev") == 0 && i + 1 < argc) {
-            snprintf(req.logical_dev, sizeof(req.logical_dev), "%s",
-                     argv[++i]);
+            snprintf(logical_dev, sizeof(logical_dev), "%s", argv[++i]);
             continue;
         }
         usage();
         return 1;
     }
 
-    if (is_empty_string(req.host_id) || is_empty_string(req.logical_dev)) {
+    if (is_empty_string(host_id) || is_empty_string(logical_dev)) {
         usage();
         return 1;
     }
 
-    if (manager_socket_path() != NULL) {
-        if (is_empty_string(req.allocate_id)) {
-            snprintf(command, sizeof(command), "MOUNT_DEV %s %s",
-                     req.logical_dev, req.host_id);
-        } else {
-            snprintf(command, sizeof(command), "MOUNT %s %s %s",
-                     req.allocate_id, req.host_id, req.logical_dev);
+    if (!is_empty_string(allocate_id)) {
+        if (!is_manager_token_safe(allocate_id) ||
+            !is_manager_token_safe(host_id) ||
+            !is_manager_token_safe(logical_dev)) {
+            usage();
+            return 1;
         }
+        snprintf(command, sizeof(command), "MOUNT %s %s %s",
+                 allocate_id, host_id, logical_dev);
         if (!manager_request(command, response, sizeof(response))) {
             return 1;
         }
         return print_manager_response(response, NULL);
     }
 
-    if (is_empty_string(req.allocate_id)) {
-        err = ssu_api_mount(req.logical_dev, req.host_id);
-    } else {
-        err = ssu_resource_mount(&req);
-    }
+    err = ubse_ssu_sdk_mount(logical_dev, host_id);
     if (err != SSU_OK) {
         print_operation_error("mount", err);
         return 1;
     }
 
-    printf("mounted %s\n", req.logical_dev);
+    printf("mounted %s\n", logical_dev);
     return 0;
 }
 
 static int cmd_unmount(int argc, char **argv)
 {
     const char *logical_dev = NULL;
-    char command[128];
-    char response[RESPONSE_SIZE];
     int i;
     ssu_err_t err;
 
@@ -1053,15 +806,7 @@ static int cmd_unmount(int argc, char **argv)
         return 1;
     }
 
-    if (manager_socket_path() != NULL) {
-        snprintf(command, sizeof(command), "UNMOUNT %s", logical_dev);
-        if (!manager_request(command, response, sizeof(response))) {
-            return 1;
-        }
-        return print_manager_response(response, NULL);
-    }
-
-    err = ssu_resource_unmount(logical_dev);
+    err = ubse_ssu_sdk_unmount(logical_dev);
     if (err != SSU_OK) {
         print_operation_error("unmount", err);
         return 1;
@@ -1077,7 +822,6 @@ static int cmd_release(int argc, char **argv)
     char command[128];
     char response[RESPONSE_SIZE];
     int i;
-    ssu_err_t err;
 
     for (i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--aid") == 0 && i + 1 < argc) {
@@ -1097,29 +841,21 @@ static int cmd_release(int argc, char **argv)
         return 1;
     }
 
-    if (manager_socket_path() != NULL) {
-        snprintf(command, sizeof(command), "RELEASE %s", allocate_id);
-        if (!manager_request(command, response, sizeof(response))) {
-            return 1;
-        }
-        return print_manager_response(response, NULL);
-    }
-
-    err = ssu_resource_release(allocate_id);
-    if (err != SSU_OK) {
-        print_operation_error("release", err);
+    if (!is_manager_token_safe(allocate_id)) {
+        usage();
         return 1;
     }
 
-    printf("released %s\n", allocate_id);
-    return 0;
+    snprintf(command, sizeof(command), "RELEASE %s", allocate_id);
+    if (!manager_request(command, response, sizeof(response))) {
+        return 1;
+    }
+    return print_manager_response(response, NULL);
 }
 
 static int cmd_free(int argc, char **argv)
 {
     const char *logical_dev = NULL;
-    char command[128];
-    char response[RESPONSE_SIZE];
     int i;
     ssu_err_t err;
 
@@ -1141,15 +877,7 @@ static int cmd_free(int argc, char **argv)
         return 1;
     }
 
-    if (manager_socket_path() != NULL) {
-        snprintf(command, sizeof(command), "FREE %s", logical_dev);
-        if (!manager_request(command, response, sizeof(response))) {
-            return 1;
-        }
-        return print_manager_response(response, NULL);
-    }
-
-    err = ssu_api_free(logical_dev);
+    err = ubse_ssu_sdk_free(logical_dev);
     if (err != SSU_OK) {
         print_operation_error("free", err);
         return 1;

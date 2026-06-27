@@ -143,6 +143,45 @@ if get_option('vendor') == 'mock'
   )
 endif
 
+sdk_so_path = libubse_ssu_sdk.full_path()
+sdk_dlopen_deps = [ssu_headers_dep]
+sdk_dl_dep = cpp.find_library('dl', required: false)
+if sdk_dl_dep.found()
+  sdk_dlopen_deps += sdk_dl_dep
+endif
+
+sdk_dlopen = executable(
+  'sdk_dlopen',
+  sources: ['sdk_dlopen.cpp'],
+  include_directories: inc,
+  dependencies: sdk_dlopen_deps,
+)
+
+test(
+  'sdk_dlopen',
+  sdk_dlopen,
+  args: [sdk_so_path],
+  depends: [libubse_ssu_sdk],
+)
+
+sdk_linkage = find_program('sdk_linkage.sh')
+
+test(
+  'sdk_linkage',
+  sdk_linkage,
+  args: [sdk_so_path],
+  depends: [libubse_ssu_sdk],
+)
+
+ubsectl_linkage = find_program('ubsectl_linkage.sh')
+
+test(
+  'ubsectl_linkage',
+  ubsectl_linkage,
+  args: [ubsectl.full_path()],
+  depends: [ubsectl],
+)
+
 dataplane_mock = executable(
   'dataplane_mock',
   sources: ['dataplane_mock.cpp'],

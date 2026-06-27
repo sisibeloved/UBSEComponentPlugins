@@ -86,10 +86,11 @@ flowchart TB
 
 ```
 UBSEComponentPlugins/
-├── include/                  # 对外公共头：ssu_api.h / ssu_controller.h / ssu_plugin.h / ssu_dataplane.h
+├── include/                  # 公共头：ubse_ssu_sdk.h / ssu_api.h / ssu_controller.h / ...
 ├── src/
 │   ├── user/
-│   │   ├── api/              # libssu_api（5 操作对外 ABI）
+│   │   ├── api/              # libssu_api（ssu-mgr 进程内 server 侧 API）
+│   │   ├── sdk/              # libubse_ssu_sdk（上游 APP dlopen 的客户端 SDK）
 │   │   ├── controller/       # Controller：分配/2 步释放/纳管/对账/扩缩容
 │   │   ├── scheduler/        # Scheduler：MVP 最简选片
 │   │   ├── dataplane/        # 用户态数据面辅助
@@ -119,14 +120,19 @@ UBSEComponentPlugins/
 meson setup build
 ninja -C build
 
-# 2. 以 Manager 角色跑一次（mock 出 2 个 SSU），查询池
+# 2. 以 Manager 角色跑一次（mock 出 2 个 SSU），检查发现结果
 SSU_MOCK_SSU_COUNT=2 ./build/src/user/runtime/ssu-mgr \
     --role manager --config tests/mvp1/ssu.conf --once
 # 期望输出含：pool entries: 2
 
-# 3. 用 CLI 查询
+# 3. 启动常驻 Manager，再用 CLI 查询
+SSU_MOCK_SSU_COUNT=2 ./build/src/user/runtime/ssu-mgr \
+    --role manager --config tests/mvp1/ssu.conf &
+mgr_pid=$!
+
 SSU_MOCK_SSU_COUNT=2 ./build/tools/ubsectl query --type pool
 # 期望输出含：mock-ssu0  mock-host0  ONLINE  0/1073741824
+kill "$mgr_pid"
 ```
 
 跑一次完整的 SDK 端到端（分配→挂载→读写校验→解挂载→释放，文件后端）：
@@ -236,53 +242,60 @@ ubsectl query   --type pool|allocation|logdev
 
 业务方所在节点的底层已由平台运维就位，业务方**无需关心**，只需知道两件事：
 
-- 本组件已在节点上运行（由 `ubs-engine` daemon 托管，或独立 `ssu-agent`），提供控制面服务，监听本地 FIFO（默认 `/tmp/ubse-ssu-mgr.fifo`，可经 `SSU_MGR_SOCKET` 覆盖）。
+- 本组件已在节点上运行（由 `ubs-engine` daemon 托管，或独立 `ssu-agent`/`ssu-mgr`），提供控制面服务，监听本地 FIFO（默认 `/tmp/ubse-ssu-mgr.fifo`，可经 `SSU_MGR_SOCKET` 覆盖）。
 - 内核侧 `ssu_reqshim.ko` 已加载（`/dev/ssu-ctrl` 在），业务方挂载成功后会出现 `/dev/ssuN` 逻辑块设备。
 
 ### 步骤 1：链接 SDK / 准备 CLI
 
-业务方**只需** `libssu_api.so`（导出 `libubse` SDK）与头文件 `ssu_api.h`：
+业务方**只需**客户端 SDK：`libubse_ssu_sdk.so` 与头文件 `ubse_ssu_sdk.h`。它只和本机 `ssu-mgr` 通信，不链接 controller、scheduler 或厂商 plugin。`ubsectl` 也是这个 SDK 的命令行 client。`libssu_api.so` 是 `ssu-mgr` 内部使用的 server 侧库，上游 APP 不要 dlopen 它。
 
 ```bash
-# 编译业务程序
-gcc my_app.c -o my_app -lssu_api
+# 业务程序推荐运行时 dlopen，不需要链接 server 侧库
+gcc my_app.c -o my_app -I/path/to/include -ldl
 # 或管理脚本用 ubsectl（无需编码）
 ```
 
-5 类操作（`ssu_resource_alloc` / `mount` / `unmount` / `release` / `query`）、数据结构、错误码、能力门控语义见 `ssu_api.h` 与设计文档 §3。
+逻辑操作（`allocate` / `allocate_result_get` / `list` / `mount` / `unmount` / `free`）、数据结构、错误码、能力门控语义见 `ubse_ssu_sdk.h`、`ssu_api.h` 与设计文档 §3。
 
 ### 步骤 2：控制面 —— 申请、挂载、读写、归还
 
 典型生命周期（程序化）：
 
 ```c
-#include "ssu_api.h"
+#include "ubse_ssu_sdk.h"
 
-/* ① 申请空间（在组件 SSU 上建 namespace，返回 allocate_id） */
-ssu_alloc_req_t req = { .size_bytes  = 1ULL << 30,
-                        .reliability = SSU_RELIABILITY_STRIPE,
-                        .share_type  = SSU_SHARE_EXCLUSIVE };
-ssu_alloc_result_t out;
-ssu_alloc_extent_t extents[8];
-uint32_t           n = 8;
-if (ssu_resource_alloc(&req, &out, extents, &n) == SSU_ERR_BUFFER_TOO_SMALL) {
-    /* 扩容 extents 数组后重试（n 已被改写为所需数量） */
-}
+/* dlopen("libubse_ssu_sdk.so") 后 dlsym("ubse_ssu_sdk_entry") 一次，
+ * 得到 ubse_ssu_sdk_ops_t *sdk；随后先 sdk->init(NULL)。
+ */
 
-/* ② 挂载到本节点（建 /dev/ssu0 + 写映射） */
-ssu_mount_req_t m = { .allocate_id = out.allocate_id,
-                      .host_id     = "node-1",
-                      .logical_dev = "/dev/ssu0" };
-ssu_resource_mount(&m);
+/* ① 申请空间（在组件 SSU 上建 namespace，返回 request_id） */
+const char *hosts[] = {"node-1"};
+ssu_api_allocate_req_t req = {
+    .size_bytes = 1ULL << 30,
+    .physical_disk_count = 1,
+    .logical_disk_aggregate = 1,
+    .allocation_type = SSU_SHARE_EXCLUSIVE,
+    .host_ids = hosts,
+    .host_count = 1,
+};
+ssu_api_allocate_resp_t alloc;
+sdk->allocate(&req, &alloc);
 
-/* ③ 数据面：对 /dev/ssu0 的标准 read/write 即业务 I/O，
+/* ② 获取逻辑设备路径 */
+ssu_api_allocate_result_info_t result;
+sdk->allocate_result_get(alloc.request_id, &result);
+
+/* ③ 挂载到本节点（建 /dev/ssu/* + 写映射） */
+sdk->mount(result.device_path, "node-1");
+
+/* ④ 数据面：对 result.device_path 的标准 read/write 即业务 I/O，
       内核 ReqShim 自动做命令转换并下发到 SSU */
-int fd = open("/dev/ssu0", O_RDWR);
+int fd = open(result.device_path, O_RDWR);
 write(fd, buf, len);   /* 读写在业务侧就是普通块设备操作 */
 
-/* ④ 归还（两种语义，二选一） */
-ssu_resource_unmount("/dev/ssu0");   /* 解挂载：保留数据，可再 mount 或迁移 */
-ssu_resource_release(out.allocate_id); /* 释放：先擦数据再删 namespace，彻底归还 */
+/* ⑤ 归还 */
+sdk->unmount(result.device_path); /* 解挂载：保留数据，可再 mount 或迁移 */
+sdk->free(result.device_path);    /* 释放：先擦数据再删 namespace，彻底归还 */
 ```
 
 等价的命令行（运维/排查）：

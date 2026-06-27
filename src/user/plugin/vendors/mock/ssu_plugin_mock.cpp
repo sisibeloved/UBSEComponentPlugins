@@ -566,8 +566,9 @@ static ssu_err_t mock_mount(const char *allocate_id, const char *host_id,
         return err;
     }
 
-    err = ssu_reqshim_mount_logdev(logical_dev, maps, map_count, 1,
-                                   NULL, NULL, NULL, NULL);
+    err = ssu_reqshim_mount_logdev_for_allocate(
+        logical_dev, allocate_id, maps, map_count, 1,
+        NULL, NULL, NULL, NULL);
     if (err != SSU_OK) {
         return err;
     }
@@ -604,8 +605,9 @@ static ssu_err_t mock_unmount(const char *logical_dev)
         return err;
     }
 
-    err = ssu_reqshim_unmount_logdev(logical_dev, maps, map_count, 1,
-                                     NULL, NULL, NULL, NULL);
+    err = ssu_reqshim_unmount_logdev_for_allocate(
+        logical_dev, mount->allocate_id, maps, map_count, 1,
+        NULL, NULL, NULL, NULL);
     if (err != SSU_OK) {
         return err;
     }

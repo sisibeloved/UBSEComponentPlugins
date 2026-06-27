@@ -14,10 +14,16 @@ cpp = meson.get_compiler('cpp')
 inc = include_directories('include')
 ssu_headers_dep = declare_dependency(include_directories: inc)
 
+install_headers(
+  'include/ssu_api.h',
+  'include/ubse_ssu_sdk.h',
+)
+
 subdir('src/user/controller')
 subdir('src/user/scheduler')
 subdir('src/user/plugin')
 subdir('src/user/api')
+subdir('src/user/sdk')
 subdir('src/user/dataplane')
 subdir('src/user/runtime')
 subdir('tools')

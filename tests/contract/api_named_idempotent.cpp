@@ -53,7 +53,9 @@ int main(void)
     ssu_api_allocate_result_info_t result;
     ssu_query_req_t query_req = {};
     ssu_allocation_info_t allocations[4];
+    ssu_logdev_info_t logdevs[2];
     uint32_t allocation_count = 4;
+    uint32_t logdev_count = 2;
 
     setenv("SSU_MOCK_SSU_COUNT", "3", 1);
 
@@ -72,7 +74,7 @@ int main(void)
         return 1;
     }
 
-    if (strcmp(first.request_id, "data-a") != 0) {
+    if (strcmp(first.request_id, "alloc-0") != 0) {
         fprintf(stderr, "unexpected named request id: %s\n",
                 first.request_id);
         return 1;
@@ -86,7 +88,7 @@ int main(void)
     }
 
     if (result.status != SSU_OK ||
-        strcmp(result.device_path, "/dev/ssu/ssu0") != 0 ||
+        strcmp(result.device_path, "/dev/ssu/data-a") != 0 ||
         result.physical_disk_count != 2 ||
         strcmp(result.physical_disks[0].ssu_id, "mock-ssu0") != 0 ||
         strcmp(result.physical_disks[1].ssu_id, "mock-ssu1") != 0 ||
@@ -123,14 +125,46 @@ int main(void)
     }
 
     if (allocation_count != 2 ||
-        strcmp(allocations[0].allocate_id, "data-a") != 0 ||
-        strcmp(allocations[1].allocate_id, "data-a") != 0) {
+        strcmp(allocations[0].allocate_id, "alloc-0") != 0 ||
+        strcmp(allocations[1].allocate_id, "alloc-0") != 0 ||
+        strcmp(allocations[0].disk_name, "data-a") != 0 ||
+        strcmp(allocations[1].disk_name, "data-a") != 0) {
         fprintf(stderr, "idempotent allocate created %u allocation rows\n",
                 allocation_count);
         return 1;
     }
 
     if (expect_named_pool_usage(4096) != 0) {
+        return 1;
+    }
+
+    if (expect_err("mount named disk",
+                   ssu_api_mount(result.device_path, "nodeA"),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    query_req.type = SSU_QUERY_LOGDEV;
+    memset(logdevs, 0, sizeof(logdevs));
+    if (expect_err("query named logdev",
+                   ssu_resource_query(&query_req, logdevs,
+                                      sizeof(logdevs[0]), &logdev_count),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (logdev_count != 2 ||
+        strcmp(logdevs[0].logical_dev, "/dev/ssu/data-a") != 0 ||
+        strcmp(logdevs[1].logical_dev, "/dev/ssu/data-a") != 0 ||
+        strcmp(logdevs[0].allocate_id, "alloc-0") != 0 ||
+        strcmp(logdevs[1].allocate_id, "alloc-0") != 0) {
+        fputs("named mount did not preserve the logical disk name\n",
+              stderr);
+        return 1;
+    }
+
+    if (expect_err("unmount named disk",
+                   ssu_api_unmount(result.device_path), SSU_OK) != 0) {
         return 1;
     }
 
@@ -153,6 +187,13 @@ int main(void)
     req.host_ids = hosts;
     req.disk_name = "bad name";
     if (expect_err("invalid disk name",
+                   ssu_api_allocate(&req, &second),
+                   SSU_ERR_INVALID) != 0) {
+        return 1;
+    }
+
+    req.disk_name = "abcdefghijklmnopqrstuvwxyz12";
+    if (expect_err("too long disk name",
                    ssu_api_allocate(&req, &second),
                    SSU_ERR_INVALID) != 0) {
         return 1;
@@ -182,16 +223,22 @@ int main(void)
         return 1;
     }
 
-    if (strcmp(first.request_id, "shared-a") != 0 ||
-        strcmp(second.request_id, "shared-a") != 0) {
+    if (strcmp(first.request_id, "alloc-1") != 0 ||
+        strcmp(second.request_id, "alloc-1") != 0) {
         fputs("shared named allocate did not preserve request id\n", stderr);
         return 1;
     }
 
     memset(&result, 0, sizeof(result));
     if (expect_err("shared named allocate result",
-                   ssu_api_allocate_result_get("shared-a", &result),
+                   ssu_api_allocate_result_get("alloc-1", &result),
                    SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (strcmp(result.device_path, "/dev/ssu/shared-a") != 0) {
+        fprintf(stderr, "unexpected shared named path: %s\n",
+                result.device_path);
         return 1;
     }
 
