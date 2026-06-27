@@ -41,11 +41,42 @@ if get_option('vendor') == 'lbc_mock'
     timeout: 20,
   )
 
+  userguide_sdk_flow = executable(
+    'userguide_sdk_flow',
+    sources: ['userguide_sdk_flow.cpp'],
+    include_directories: inc,
+    dependencies: sdk_flow_deps,
+  )
+
+  lbc_mock_userguide_sdk_flow = find_program('userguide_sdk_flow.sh')
+
+  test(
+    'lbc_mock_userguide_sdk_flow',
+    lbc_mock_userguide_sdk_flow,
+    args: [
+      meson.project_build_root(),
+      userguide_sdk_flow.full_path(),
+      libubse_ssu_sdk.full_path(),
+    ],
+    depends: [userguide_sdk_flow, libubse_ssu_sdk, ssu_mgr],
+    timeout: 20,
+  )
+
   lbc_mock_ubsectl_flow = find_program('ubsectl_flow.sh')
 
   test(
     'lbc_mock_ubsectl_flow',
     lbc_mock_ubsectl_flow,
+    args: [meson.project_build_root()],
+    depends: [ubsectl, ssu_mgr],
+    timeout: 20,
+  )
+
+  lbc_mock_userguide_cli_flow = find_program('userguide_cli_flow.sh')
+
+  test(
+    'lbc_mock_userguide_cli_flow',
+    lbc_mock_userguide_cli_flow,
     args: [meson.project_build_root()],
     depends: [ubsectl, ssu_mgr],
     timeout: 20,

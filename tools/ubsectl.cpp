@@ -440,8 +440,8 @@ static int write_alloc_output(const char *allocate_id, const char *out_path)
 {
     FILE *fp;
 
+    printf("%s\n", allocate_id);
     if (out_path == NULL) {
-        printf("%s\n", allocate_id);
         return 0;
     }
 
