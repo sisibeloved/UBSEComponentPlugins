@@ -463,6 +463,23 @@ static int is_nvme_namespace_name(const char *name)
     return 0;
 }
 
+static int is_namespace_id_name(const char *name)
+{
+    const char *p;
+
+    if (is_empty_string(name)) {
+        return 0;
+    }
+
+    for (p = name; *p != '\0'; p++) {
+        if (!isdigit((unsigned char)*p)) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
 static std::set<std::string> scan_nvme_namespaces(void)
 {
     std::set<std::string> result;
@@ -493,6 +510,44 @@ static std::set<std::string> scan_nvme_namespaces(void)
     return result;
 }
 
+static int namespace_root_path(char *out, size_t n)
+{
+    char subsystem_path[512];
+
+    if (!checked_join(subsystem_path, sizeof(subsystem_path),
+                      lbc_config.configfs_dir, lbc_config.subnqn)) {
+        return 0;
+    }
+
+    return checked_join(out, n, subsystem_path, "namespaces");
+}
+
+static std::set<std::string> scan_configfs_namespace_ids(void)
+{
+    std::set<std::string> result;
+    char ns_root[512];
+    DIR *dir;
+    struct dirent *entry;
+
+    if (!namespace_root_path(ns_root, sizeof(ns_root))) {
+        return result;
+    }
+
+    dir = opendir(ns_root);
+    if (dir == NULL) {
+        return result;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        if (is_namespace_id_name(entry->d_name)) {
+            result.insert(entry->d_name);
+        }
+    }
+
+    closedir(dir);
+    return result;
+}
+
 static int choose_created_dev(const std::set<std::string> &before,
                               char *out_dev_path, size_t n)
 {
@@ -517,6 +572,78 @@ static int choose_created_dev(const std::set<std::string> &before,
     }
 
     return 0;
+}
+
+static int choose_created_nsid(const std::set<std::string> &before,
+                               char *out_ns_id, size_t n)
+{
+    std::set<std::string> after;
+    int attempt;
+
+    for (attempt = 0; attempt < 50; attempt++) {
+        after = scan_configfs_namespace_ids();
+        for (const std::string &ns_id : after) {
+            if (before.find(ns_id) == before.end()) {
+                copy_cstr(out_ns_id, n, ns_id.c_str());
+                return 1;
+            }
+        }
+
+        usleep(100000);
+    }
+
+    return 0;
+}
+
+static int parse_nsid_from_dev_path(const char *dev_path, char *out_ns_id,
+                                    size_t n)
+{
+    const char *name;
+    const char *ns_part;
+    char *end = NULL;
+    unsigned long nsid;
+
+    if (is_empty_string(dev_path) || out_ns_id == NULL || n == 0) {
+        return 0;
+    }
+
+    name = strrchr(dev_path, '/');
+    name = name == NULL ? dev_path : name + 1;
+    if (strncmp(name, "nvme", 4) != 0) {
+        return 0;
+    }
+
+    ns_part = strrchr(name, 'n');
+    if (ns_part == NULL || ns_part[1] == '\0') {
+        return 0;
+    }
+
+    errno = 0;
+    nsid = strtoul(ns_part + 1, &end, 10);
+    if (errno != 0 || end == ns_part + 1 || *end != '\0' ||
+        nsid == 0 || nsid > UINT32_MAX) {
+        return 0;
+    }
+
+    snprintf(out_ns_id, n, "%lu", nsid);
+    return 1;
+}
+
+static void advance_next_nsid_hint(const char *ns_id)
+{
+    char *end = NULL;
+    unsigned long nsid;
+
+    if (is_empty_string(ns_id)) {
+        return;
+    }
+
+    errno = 0;
+    nsid = strtoul(ns_id, &end, 10);
+    if (errno == 0 && end != ns_id && *end == '\0' &&
+        nsid < UINT32_MAX && nsid >= next_nsid) {
+        next_nsid = (uint32_t)nsid + 1U;
+    }
 }
 
 static lbc_mock_namespace_t *find_namespace_by_allocate(
@@ -806,6 +933,7 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
 {
     lbc_mock_namespace_t *slot = NULL;
     std::set<std::string> before;
+    std::set<std::string> ns_before;
     char ns_id[32];
     char nsze[32];
     char port[16];
@@ -898,6 +1026,7 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
                      lbc_config.dev_dir, errno);
     }
     before = scan_nvme_namespaces();
+    ns_before = scan_configfs_namespace_ids();
     snprintf(port, sizeof(port), "%u", (unsigned int)lbc_config.port);
     snprintf(nsze, sizeof(nsze), "%llu", (unsigned long long)nsze_value);
     err = run_command_in_prefix(argv);
@@ -916,7 +1045,16 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
         return SSU_ERR_NOT_FOUND;
     }
 
-    snprintf(ns_id, sizeof(ns_id), "%u", next_nsid);
+    if (!choose_created_nsid(ns_before, ns_id, sizeof(ns_id))) {
+        if (parse_nsid_from_dev_path(dev_path, ns_id, sizeof(ns_id))) {
+            lbc_mock_log("create_ns warning: configfs nsid not found; inferred ns_id=%s from dev_path=%s",
+                         ns_id, dev_path);
+        } else {
+            snprintf(ns_id, sizeof(ns_id), "%u", next_nsid);
+            lbc_mock_log("create_ns warning: cannot determine actual nsid; using fallback ns_id=%s dev_path=%s",
+                         ns_id, dev_path);
+        }
+    }
 
     memset(slot, 0, sizeof(*slot));
     slot->active = 1;
@@ -931,7 +1069,7 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
 
     copy_cstr(out_ns_id, n, ns_id);
     *out_phys_sector = extent_req->phys_offset_hint;
-    next_nsid++;
+    advance_next_nsid_hint(ns_id);
     lbc_mock_log("create_ns success allocate_id=%s ns_id=%s dev_path=%s length=%llu lba=%llu nsze=%llu",
                  extent_req->allocate_id, ns_id, dev_path,
                  (unsigned long long)extent_req->length,

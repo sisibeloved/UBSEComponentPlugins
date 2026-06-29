@@ -65,8 +65,12 @@ if [ "\$sample" = "./sample_create_attach" ]; then
     : > "$dev_dir/nvme1n\$nsid"
     mkdir -p "$configfs_dir/\$subnqn/namespaces/\$nsid"
 elif [ "\$sample" = "./sample_detach_delete" ]; then
+    if [ ! -d "$configfs_dir/\$subnqn/namespaces/\$nsid" ]; then
+        echo missing-nsid "\$nsid" >> "$log_file"
+        exit 17
+    fi
     rm -f "\$devpath"
-    rm -rf "$configfs_dir/\$subnqn/namespaces/\$nsid"
+    rmdir "$configfs_dir/\$subnqn/namespaces/\$nsid"
 else
     exit 2
 fi
@@ -139,9 +143,9 @@ test "$rid" = "alloc-1"
 result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$rid")
 dev=$(printf '%s\n' "$result" | sed -n '1p')
 test "$dev" = "/dev/ssu/ssu1"
-printf '%s\n' "$result" | grep -q '^physical 0 lbc-mock-ssu0 2 0 4096 lba=0$'
-printf '%s\n' "$result" | grep -q '^physical 1 lbc-mock-ssu1 3 4096 4096 lba=0$'
-printf '%s\n' "$result" | grep -q '^physical 2 lbc-mock-ssu2 4 8192 4096 lba=0$'
+printf '%s\n' "$result" | grep -q '^physical 0 lbc-mock-ssu0 1 0 4096 lba=0$'
+printf '%s\n' "$result" | grep -q '^physical 1 lbc-mock-ssu1 2 4096 4096 lba=0$'
+printf '%s\n' "$result" | grep -q '^physical 2 lbc-mock-ssu2 3 8192 4096 lba=0$'
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
@@ -152,9 +156,9 @@ SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"
 test ! -e "$dev_dir/nvme1n1"
 test ! -e "$dev_dir/nvme1n2"
 test ! -e "$dev_dir/nvme1n3"
+test ! -d "$configfs_dir/$subnqn/namespaces/1"
 test ! -d "$configfs_dir/$subnqn/namespaces/2"
 test ! -d "$configfs_dir/$subnqn/namespaces/3"
-test ! -d "$configfs_dir/$subnqn/namespaces/4"
 
 grep -q 'setup nqn.2025-01.io.ssu:m0 4420' "$log_file"
 grep -q "config file loaded: $config_file" "$log_file"
@@ -168,7 +172,7 @@ grep -q 'create_ns success allocate_id=alloc-0 ns_id=1' "$log_file"
 grep -q 'mount success allocate_id=alloc-0 host_id=local logical_dev=/dev/ssu0' "$log_file"
 grep -q 'unmount success logical_dev=/dev/ssu0 allocate_id=alloc-0 host_id=local' "$log_file"
 grep -q 'delete_ns success ssu_id=lbc-mock-ssu0 ns_id=1' "$log_file"
-grep -q 'delete_ns success ssu_id=lbc-mock-ssu2 ns_id=4' "$log_file"
+grep -q 'delete_ns success ssu_id=lbc-mock-ssu2 ns_id=3' "$log_file"
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
     --size 8192 \
