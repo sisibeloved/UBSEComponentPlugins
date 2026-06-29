@@ -237,6 +237,265 @@ static int expect_response_timeout_detail(const ubse_ssu_sdk_ops_t *sdk,
     return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : 1;
 }
 
+static int read_line(int fd, char *buf, size_t n)
+{
+    size_t used = 0;
+
+    if (buf == NULL || n == 0) {
+        return 0;
+    }
+
+    while (used + 1 < n) {
+        char ch;
+        ssize_t got = read(fd, &ch, 1);
+
+        if (got < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return 0;
+        }
+
+        if (got == 0) {
+            break;
+        }
+
+        buf[used++] = ch;
+        if (ch == '\n') {
+            break;
+        }
+    }
+
+    buf[used] = '\0';
+    return used > 0;
+}
+
+static const char *fake_response_for_command(const char *command)
+{
+    if (strncmp(command, "LIST", 4) == 0) {
+        return "OK\npool entries: 1\nmock-ssu0 host0 ONLINE 0/1048576\n";
+    }
+    if (strncmp(command, "ALLOCATE ", 9) == 0) {
+        return "OK\nreq-audit-0\n";
+    }
+    if (strncmp(command, "ALLOCATE_RESULT ", 16) == 0) {
+        return "OK\n/dev/ssu/audit-disk\nphysical 0 mock-ssu0 1 0 1048576 lba=0\n";
+    }
+    if (strncmp(command, "MOUNT_DEV ", 10) == 0 ||
+        strncmp(command, "UNMOUNT ", 8) == 0 ||
+        strncmp(command, "FREE ", 5) == 0) {
+        return "OK\n";
+    }
+    return "ERR -1\nunknown command\n";
+}
+
+static void fake_manager_loop(const char *socket_path, int ready_fd,
+                              unsigned int expected_requests)
+{
+    int fd = open(socket_path, O_RDWR);
+    unsigned int handled = 0;
+
+    if (fd < 0) {
+        _exit(2);
+    }
+
+    (void)write(ready_fd, "1", 1);
+    close(ready_fd);
+
+    while (handled < expected_requests) {
+        char line[1024];
+        char response_path[256];
+        char *command;
+        char *space;
+        int response_fd;
+        const char *response;
+
+        if (!read_line(fd, line, sizeof(line))) {
+            break;
+        }
+
+        space = strchr(line, ' ');
+        if (space == NULL) {
+            break;
+        }
+        *space = '\0';
+        command = space + 1;
+        command[strcspn(command, "\r\n")] = '\0';
+        strncpy(response_path, line, sizeof(response_path) - 1);
+        response_path[sizeof(response_path) - 1] = '\0';
+
+        response = fake_response_for_command(command);
+        response_fd = open(response_path, O_WRONLY);
+        if (response_fd < 0) {
+            break;
+        }
+        (void)write(response_fd, response, strlen(response));
+        close(response_fd);
+        handled++;
+    }
+
+    close(fd);
+    _exit(handled == expected_requests ? 0 : 3);
+}
+
+static int expect_success_audit_log(const ubse_ssu_sdk_ops_t *sdk,
+                                    const char *root)
+{
+    char socket_path[256];
+    char log_path[256];
+    char log_text[8192];
+    ssu_resource_info_t resources[2];
+    ssu_api_allocate_req_t req;
+    ssu_api_allocate_resp_t resp;
+    ssu_api_allocate_result_info_t result;
+    uint32_t count = 2;
+    const char *hosts[] = {"host0"};
+    pid_t child;
+    int status = 0;
+    int ready_pipe[2];
+    char ready_byte;
+    int failed = 0;
+
+    snprintf(socket_path, sizeof(socket_path), "%s/audit-manager.fifo",
+             root);
+    snprintf(log_path, sizeof(log_path), "%s/sdk-audit.log", root);
+    unlink(socket_path);
+    unlink(log_path);
+
+    if (mkfifo(socket_path, 0600) != 0) {
+        perror("mkfifo");
+        return 1;
+    }
+
+    if (pipe(ready_pipe) != 0) {
+        perror("pipe");
+        unlink(socket_path);
+        return 1;
+    }
+
+    child = fork();
+    if (child < 0) {
+        perror("fork");
+        close(ready_pipe[0]);
+        close(ready_pipe[1]);
+        unlink(socket_path);
+        return 1;
+    }
+
+    if (child == 0) {
+        close(ready_pipe[0]);
+        fake_manager_loop(socket_path, ready_pipe[1], 6);
+    }
+
+    close(ready_pipe[1]);
+    if (read(ready_pipe[0], &ready_byte, 1) != 1) {
+        perror("read ready pipe");
+        close(ready_pipe[0]);
+        kill(child, SIGKILL);
+        waitpid(child, &status, 0);
+        unlink(socket_path);
+        return 1;
+    }
+    close(ready_pipe[0]);
+
+    setenv("SSU_MGR_SOCKET", socket_path, 1);
+    setenv("UBSE_SSU_SDK_LOG", log_path, 1);
+    unsetenv("UBSE_SSU_SDK_RESPONSE_TIMEOUT_MS");
+
+    if (sdk->init(NULL) != SSU_OK) {
+        fputs("sdk init failed in audit flow\n", stderr);
+        kill(child, SIGKILL);
+        waitpid(child, &status, 0);
+        unlink(socket_path);
+        return 1;
+    }
+
+    memset(resources, 0, sizeof(resources));
+    if (sdk->list(resources, &count) != SSU_OK) {
+        fputs("sdk list failed in audit flow\n", stderr);
+        failed = 1;
+    }
+
+    memset(&req, 0, sizeof(req));
+    memset(&resp, 0, sizeof(resp));
+    req.size_bytes = 1048576;
+    req.user_id = "user-audit";
+    req.physical_disk_count = 1;
+    req.logical_disk_aggregate = 1;
+    req.allocation_type = SSU_SHARE_EXCLUSIVE;
+    req.host_ids = hosts;
+    req.host_count = 1;
+    req.disk_name = "audit-disk";
+    if (!failed && sdk->allocate(&req, &resp) != SSU_OK) {
+        fputs("sdk allocate failed in audit flow\n", stderr);
+        failed = 1;
+    }
+
+    memset(&result, 0, sizeof(result));
+    if (!failed &&
+        sdk->allocate_result_get(resp.request_id, &result) != SSU_OK) {
+        fputs("sdk allocate_result_get failed in audit flow\n", stderr);
+        failed = 1;
+    }
+
+    if (!failed && sdk->mount(result.device_path, "host0") != SSU_OK) {
+        fputs("sdk mount failed in audit flow\n", stderr);
+        failed = 1;
+    }
+
+    if (!failed && sdk->unmount(result.device_path) != SSU_OK) {
+        fputs("sdk unmount failed in audit flow\n", stderr);
+        failed = 1;
+    }
+
+    if (!failed && sdk->free(result.device_path) != SSU_OK) {
+        fputs("sdk free failed in audit flow\n", stderr);
+        failed = 1;
+    }
+
+    sdk->fini();
+
+    if (waitpid(child, &status, 0) < 0) {
+        perror("waitpid");
+        unlink(socket_path);
+        return 1;
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "fake manager exited unexpectedly status=%d\n",
+                status);
+        failed = 1;
+    }
+
+    if (!read_file(log_path, log_text, sizeof(log_text))) {
+        failed = 1;
+    }
+
+    failed |= expect_contains(log_text, "audit api=init event=begin");
+    failed |= expect_contains(log_text, "audit api=init event=end result=SSU_OK(0)");
+    failed |= expect_contains(log_text, "audit api=list event=begin");
+    failed |= expect_contains(log_text, "audit api=list event=end result=SSU_OK(0)");
+    failed |= expect_contains(log_text, "audit api=allocate event=begin");
+    failed |= expect_contains(log_text, "audit api=allocate event=end result=SSU_OK(0)");
+    failed |= expect_contains(log_text, "request_id=req-audit-0");
+    failed |= expect_contains(log_text, "audit api=allocate_result_get event=begin");
+    failed |= expect_contains(log_text, "audit api=allocate_result_get event=end result=SSU_OK(0)");
+    failed |= expect_contains(log_text, "device_path=/dev/ssu/audit-disk");
+    failed |= expect_contains(log_text, "audit api=mount event=begin");
+    failed |= expect_contains(log_text, "audit api=mount event=end result=SSU_OK(0)");
+    failed |= expect_contains(log_text, "audit api=unmount event=begin");
+    failed |= expect_contains(log_text, "audit api=unmount event=end result=SSU_OK(0)");
+    failed |= expect_contains(log_text, "audit api=free event=begin");
+    failed |= expect_contains(log_text, "audit api=free event=end result=SSU_OK(0)");
+    failed |= expect_contains(log_text, "audit api=fini event=begin");
+    failed |= expect_contains(log_text, "audit api=fini event=end result=SSU_OK(0)");
+    failed |= expect_contains(log_text, "audit manager event=send op=LIST");
+    failed |= expect_contains(log_text, "audit manager event=status op=LIST result=SSU_OK(0)");
+
+    unlink(socket_path);
+    unlink(log_path);
+    return failed;
+}
+
 int main(int argc, char **argv)
 {
     char root_template[] = "/tmp/ubse-sdk-diagnostics-XXXXXX";
@@ -283,6 +542,7 @@ int main(int argc, char **argv)
 
     failed |= expect_missing_manager_detail(sdk, last_error, root);
     failed |= expect_response_timeout_detail(sdk, last_error, root);
+    failed |= expect_success_audit_log(sdk, root);
 
     dlclose(handle);
     rmdir(root);

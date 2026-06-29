@@ -14,6 +14,7 @@
 #define SDK_RESPONSE_SIZE 8192U
 #define SDK_COMMAND_SIZE 512U
 #define SDK_LAST_ERROR_SIZE 512U
+#define SDK_LOG_MESSAGE_SIZE 1024U
 #define SDK_SETTLE_AFTER_DATA_MS 20
 
 static int sdk_initialized;
@@ -21,6 +22,7 @@ static char sdk_socket_path[256];
 static char sdk_log_path[256];
 static uint32_t sdk_response_timeout_ms;
 static unsigned int sdk_response_counter;
+static unsigned long long sdk_audit_counter;
 static char sdk_last_error[SDK_LAST_ERROR_SIZE];
 
 static int is_empty_string(const char *s)
@@ -194,7 +196,7 @@ static void append_sdk_log(const char *message)
 
 static void sdk_logf(const char *fmt, ...)
 {
-    char message[SDK_LAST_ERROR_SIZE];
+    char message[SDK_LOG_MESSAGE_SIZE];
     va_list ap;
 
     va_start(ap, fmt);
@@ -202,6 +204,109 @@ static void sdk_logf(const char *fmt, ...)
     va_end(ap);
 
     append_sdk_log(message);
+}
+
+static unsigned long long next_audit_id(void)
+{
+    sdk_audit_counter++;
+    return sdk_audit_counter;
+}
+
+static void sdk_audit_api_beginf(unsigned long long call_id,
+                                 const char *api,
+                                 const char *fmt, ...)
+{
+    char detail[SDK_LOG_MESSAGE_SIZE];
+    va_list ap;
+
+    detail[0] = '\0';
+    if (fmt != NULL) {
+        va_start(ap, fmt);
+        vsnprintf(detail, sizeof(detail), fmt, ap);
+        va_end(ap);
+    }
+
+    sdk_logf("audit api=%s event=begin call_id=%llu %s",
+             api, call_id, detail);
+}
+
+static void sdk_audit_api_endf(unsigned long long call_id,
+                               const char *api,
+                               long long start_ms,
+                               ssu_err_t err,
+                               const char *fmt, ...)
+{
+    char detail[SDK_LOG_MESSAGE_SIZE];
+    long long elapsed_ms;
+    va_list ap;
+
+    detail[0] = '\0';
+    if (fmt != NULL) {
+        va_start(ap, fmt);
+        vsnprintf(detail, sizeof(detail), fmt, ap);
+        va_end(ap);
+    }
+
+    elapsed_ms = monotonic_ms() - start_ms;
+    if (elapsed_ms < 0) {
+        elapsed_ms = 0;
+    }
+
+    sdk_logf("audit api=%s event=end result=%s(%d) call_id=%llu elapsed_ms=%lld %s",
+             api, ssu_err_name(err), err, call_id, elapsed_ms, detail);
+}
+
+static void sdk_audit_manager_endf(unsigned long long manager_id,
+                                   const char *op,
+                                   const char *event,
+                                   long long start_ms,
+                                   ssu_err_t err,
+                                   const char *fmt, ...)
+{
+    char detail[SDK_LOG_MESSAGE_SIZE];
+    long long elapsed_ms;
+    va_list ap;
+
+    detail[0] = '\0';
+    if (fmt != NULL) {
+        va_start(ap, fmt);
+        vsnprintf(detail, sizeof(detail), fmt, ap);
+        va_end(ap);
+    }
+
+    elapsed_ms = monotonic_ms() - start_ms;
+    if (elapsed_ms < 0) {
+        elapsed_ms = 0;
+    }
+
+    sdk_logf("audit manager event=%s op=%s result=%s(%d) manager_id=%llu elapsed_ms=%lld %s",
+             event, op, ssu_err_name(err), err, manager_id, elapsed_ms,
+             detail);
+}
+
+static void command_op(const char *command, char *out, size_t n)
+{
+    size_t len;
+    const char *space;
+
+    if (out == NULL || n == 0) {
+        return;
+    }
+
+    out[0] = '\0';
+    if (is_empty_string(command)) {
+        copy_cstr(out, n, "(invalid)");
+        return;
+    }
+
+    space = strchr(command, ' ');
+    len = space == NULL ? strlen(command) : (size_t)(space - command);
+    if (len >= n) {
+        len = n - 1;
+    }
+
+    memcpy(out, command, len);
+    out[len] = '\0';
 }
 
 static void clear_last_error(void)
@@ -365,15 +470,25 @@ static ssu_err_t manager_request(const char *command, char *response, size_t n)
     const char *request_path = active_socket_path();
     char response_path[128];
     char request[SDK_COMMAND_SIZE + 160];
+    char op[64];
+    const unsigned long long manager_id = next_audit_id();
+    const long long start_ms = monotonic_ms();
     int request_fd;
     int rc;
     ssu_err_t err;
+
+    command_op(command, op, sizeof(op));
+    sdk_logf("audit manager event=begin op=%s manager_id=%llu request_fifo=%s command=\"%s\"",
+             op, manager_id, request_path == NULL ? "(null)" : request_path,
+             command == NULL ? "(null)" : command);
 
     if (is_empty_string(command) || response == NULL || n == 0 ||
         is_empty_string(request_path)) {
         set_last_errorf("invalid manager request command=%s request_fifo=%s",
                         command == NULL ? "(null)" : command,
                         request_path == NULL ? "(null)" : request_path);
+        sdk_audit_manager_endf(manager_id, op, "response", start_ms,
+                               SSU_ERR_INVALID, "bytes=0");
         return SSU_ERR_INVALID;
     }
 
@@ -382,6 +497,8 @@ static ssu_err_t manager_request(const char *command, char *response, size_t n)
                   (long)getpid(), sdk_response_counter++);
     if (rc < 0 || (size_t)rc >= sizeof(response_path)) {
         set_last_errorf("response fifo path too long");
+        sdk_audit_manager_endf(manager_id, op, "response", start_ms,
+                               SSU_ERR_INVALID, "bytes=0");
         return SSU_ERR_INVALID;
     }
 
@@ -389,14 +506,23 @@ static ssu_err_t manager_request(const char *command, char *response, size_t n)
     if (mkfifo(response_path, 0600) != 0) {
         set_last_errorf("mkfifo response fifo failed response_fifo=%s errno=%d (%s)",
                         response_path, errno, strerror(errno));
+        sdk_audit_manager_endf(manager_id, op, "response", start_ms,
+                               SSU_ERR_IO, "response_fifo=%s bytes=0",
+                               response_path);
         return SSU_ERR_IO;
     }
+
+    sdk_logf("audit manager event=send op=%s manager_id=%llu request_fifo=%s response_fifo=%s command=\"%s\"",
+             op, manager_id, request_path, response_path, command);
 
     rc = snprintf(request, sizeof(request), "%s %s\n",
                   response_path, command);
     if (rc < 0 || (size_t)rc >= sizeof(request)) {
         unlink(response_path);
         set_last_errorf("manager request too long command=%s", command);
+        sdk_audit_manager_endf(manager_id, op, "response", start_ms,
+                               SSU_ERR_INVALID, "response_fifo=%s bytes=0",
+                               response_path);
         return SSU_ERR_INVALID;
     }
 
@@ -407,6 +533,9 @@ static ssu_err_t manager_request(const char *command, char *response, size_t n)
         set_last_errorf("open manager fifo failed request_fifo=%s errno=%d (%s) hint=make sure ssu_mgr is running and host/container share /tmp",
                         request_path, errno, strerror(errno));
         unlink(response_path);
+        sdk_audit_manager_endf(manager_id, op, "response", start_ms, err,
+                               "request_fifo=%s response_fifo=%s bytes=0",
+                               request_path, response_path);
         return err;
     }
 
@@ -416,11 +545,19 @@ static ssu_err_t manager_request(const char *command, char *response, size_t n)
         unlink(response_path);
         set_last_errorf("write manager fifo failed request_fifo=%s errno=%d (%s)",
                         request_path, saved_errno, strerror(saved_errno));
+        sdk_audit_manager_endf(manager_id, op, "response", start_ms,
+                               SSU_ERR_IO,
+                               "request_fifo=%s response_fifo=%s bytes=0",
+                               request_path, response_path);
         return SSU_ERR_IO;
     }
     close(request_fd);
 
     err = read_response_fifo(request_path, response_path, response, n);
+    sdk_audit_manager_endf(manager_id, op, "response", start_ms, err,
+                           "request_fifo=%s response_fifo=%s bytes=%zu",
+                           request_path, response_path,
+                           err == SSU_OK ? strlen(response) : 0U);
     unlink(response_path);
     return err;
 }
@@ -487,12 +624,18 @@ static ssu_err_t request_ok_body(const char *command,
                                  size_t body_size)
 {
     char response[SDK_RESPONSE_SIZE];
+    char op[64];
     const char *response_body = NULL;
+    const unsigned long long manager_id = next_audit_id();
+    const long long start_ms = monotonic_ms();
     ssu_err_t err;
 
+    command_op(command, op, sizeof(op));
     memset(response, 0, sizeof(response));
     err = manager_request(command, response, sizeof(response));
     if (err != SSU_OK) {
+        sdk_audit_manager_endf(manager_id, op, "status", start_ms, err,
+                               "transport=failed");
         return err;
     }
 
@@ -501,11 +644,24 @@ static ssu_err_t request_ok_body(const char *command,
         copy_cstr(body, body_size, response_body);
     }
     if (err == SSU_OK) {
+        char first_line[160];
+
+        copy_first_line(first_line, sizeof(first_line), response_body);
+        sdk_audit_manager_endf(manager_id, op, "status", start_ms, err,
+                               "detail=%s", first_line);
         clear_last_error();
     } else if (response_body != NULL) {
+        char first_line[160];
+
+        copy_first_line(first_line, sizeof(first_line), response_body);
+        sdk_audit_manager_endf(manager_id, op, "status", start_ms, err,
+                               "detail=%s", first_line);
         set_last_errorf("manager returned %s (%d) command=%s detail=%s",
                         ssu_err_name(err), err, command,
                         response_body);
+    } else {
+        sdk_audit_manager_endf(manager_id, op, "status", start_ms, err,
+                               "detail=(none)");
     }
     return err;
 }
@@ -552,11 +708,18 @@ ssu_err_t ubse_ssu_sdk_init(const ubse_ssu_sdk_init_options_t *opts)
 {
     const size_t required_size =
         offsetof(ubse_ssu_sdk_init_options_t, log_path);
+    const unsigned long long call_id = next_audit_id();
+    const long long start_ms = monotonic_ms();
 
     clear_last_error();
+    sdk_audit_api_beginf(call_id, "init", "opts=%s",
+                         opts == NULL ? "default" : "custom");
     if (opts != NULL && opts->struct_size < required_size) {
         set_last_errorf("invalid init options struct_size=%zu required_min=%zu",
                         opts->struct_size, required_size);
+        sdk_audit_api_endf(call_id, "init", start_ms, SSU_ERR_INVALID,
+                           "struct_size=%zu required_min=%zu",
+                           opts->struct_size, required_size);
         return SSU_ERR_INVALID;
     }
 
@@ -567,6 +730,8 @@ ssu_err_t ubse_ssu_sdk_init(const ubse_ssu_sdk_init_options_t *opts)
         if (!token_is_safe(opts->socket_path) ||
             strlen(opts->socket_path) >= sizeof(sdk_socket_path)) {
             set_last_errorf("invalid socket path");
+            sdk_audit_api_endf(call_id, "init", start_ms,
+                               SSU_ERR_INVALID, "reason=invalid_socket_path");
             return SSU_ERR_INVALID;
         }
         copy_cstr(sdk_socket_path, sizeof(sdk_socket_path),
@@ -579,6 +744,8 @@ ssu_err_t ubse_ssu_sdk_init(const ubse_ssu_sdk_init_options_t *opts)
         !is_empty_string(opts->log_path)) {
         if (strlen(opts->log_path) >= sizeof(sdk_log_path)) {
             set_last_errorf("invalid log path: too long");
+            sdk_audit_api_endf(call_id, "init", start_ms,
+                               SSU_ERR_INVALID, "reason=invalid_log_path");
             return SSU_ERR_INVALID;
         }
         copy_cstr(sdk_log_path, sizeof(sdk_log_path), opts->log_path);
@@ -592,14 +759,23 @@ ssu_err_t ubse_ssu_sdk_init(const ubse_ssu_sdk_init_options_t *opts)
     }
 
     sdk_initialized = 1;
-    sdk_logf("sdk init socket=%s log=%s response_timeout_ms=%u",
-             active_socket_path(), active_log_path(),
-             (unsigned int)active_response_timeout_ms());
+    sdk_audit_api_endf(call_id, "init", start_ms, SSU_OK,
+                       "socket=%s log=%s response_timeout_ms=%u",
+                       active_socket_path(), active_log_path(),
+                       (unsigned int)active_response_timeout_ms());
     return SSU_OK;
 }
 
 void ubse_ssu_sdk_fini(void)
 {
+    const unsigned long long call_id = next_audit_id();
+    const long long start_ms = monotonic_ms();
+
+    sdk_audit_api_beginf(call_id, "fini", "initialized=%d",
+                         sdk_initialized);
+    sdk_audit_api_endf(call_id, "fini", start_ms, SSU_OK,
+                       "socket=%s log=%s",
+                       active_socket_path(), active_log_path());
     sdk_initialized = 0;
     sdk_socket_path[0] = '\0';
     sdk_log_path[0] = '\0';
@@ -614,26 +790,57 @@ ssu_err_t ubse_ssu_sdk_allocate(const ssu_api_allocate_req_t *req,
     char body[SDK_RESPONSE_SIZE];
     const char *user;
     const char *disk_name;
+    const unsigned long long call_id = next_audit_id();
+    const long long start_ms = monotonic_ms();
     ssu_err_t err;
     int rc;
 
+    sdk_audit_api_beginf(
+        call_id, "allocate",
+        "req=%p out=%p size=%llu user=%s physical_disks=%u aggregate=%d share=%d host_count=%u disk_name=%s",
+        (const void *)req, (void *)out,
+        req == NULL ? 0ULL : (unsigned long long)req->size_bytes,
+        req == NULL || is_empty_string(req->user_id) ? "-" : req->user_id,
+        req == NULL ? 0U : req->physical_disk_count,
+        req == NULL ? 0 : req->logical_disk_aggregate,
+        req == NULL ? 0 : (int)req->allocation_type,
+        req == NULL ? 0U : req->host_count,
+        req == NULL || is_empty_string(req->disk_name) ? "-" :
+                                                         req->disk_name);
+
     err = ensure_initialized();
     if (err != SSU_OK) {
+        sdk_audit_api_endf(call_id, "allocate", start_ms, err,
+                           "stage=init");
         return err;
     }
 
     if (req == NULL || out == NULL || req->size_bytes == 0) {
+        set_last_errorf("allocate invalid args req=%p out=%p size=%llu",
+                        (const void *)req, (void *)out,
+                        req == NULL ? 0ULL :
+                                      (unsigned long long)req->size_bytes);
+        sdk_audit_api_endf(call_id, "allocate", start_ms,
+                           SSU_ERR_INVALID, "stage=validate");
         return SSU_ERR_INVALID;
     }
 
     if (!build_host_list(host_list, sizeof(host_list), req->host_ids,
                          req->host_count)) {
+        set_last_errorf("allocate invalid host list host_count=%u",
+                        req->host_count);
+        sdk_audit_api_endf(call_id, "allocate", start_ms,
+                           SSU_ERR_INVALID, "stage=host_list");
         return SSU_ERR_INVALID;
     }
 
     user = is_empty_string(req->user_id) ? "-" : req->user_id;
     disk_name = is_empty_string(req->disk_name) ? "-" : req->disk_name;
     if (!token_is_safe(user) || !token_is_safe(disk_name)) {
+        set_last_errorf("allocate invalid token user=%s disk_name=%s",
+                        user, disk_name);
+        sdk_audit_api_endf(call_id, "allocate", start_ms,
+                           SSU_ERR_INVALID, "stage=token");
         return SSU_ERR_INVALID;
     }
 
@@ -646,40 +853,70 @@ ssu_err_t ubse_ssu_sdk_allocate(const ssu_api_allocate_req_t *req,
                   host_list,
                   disk_name);
     if (rc < 0 || (size_t)rc >= sizeof(command)) {
+        set_last_errorf("allocate command too long");
+        sdk_audit_api_endf(call_id, "allocate", start_ms,
+                           SSU_ERR_INVALID, "stage=build_command");
         return SSU_ERR_INVALID;
     }
 
     memset(body, 0, sizeof(body));
     err = request_ok_body(command, body, sizeof(body));
     if (err != SSU_OK) {
+        sdk_audit_api_endf(call_id, "allocate", start_ms, err,
+                           "stage=manager");
         return err;
     }
 
     memset(out, 0, sizeof(*out));
     copy_first_line(out->request_id, sizeof(out->request_id), body);
-    return is_empty_string(out->request_id) ? SSU_ERR_IO : SSU_OK;
+    if (is_empty_string(out->request_id)) {
+        set_last_errorf("allocate response missing request_id");
+        sdk_audit_api_endf(call_id, "allocate", start_ms, SSU_ERR_IO,
+                           "stage=parse_response");
+        return SSU_ERR_IO;
+    }
+
+    sdk_audit_api_endf(call_id, "allocate", start_ms, SSU_OK,
+                       "request_id=%s", out->request_id);
+    return SSU_OK;
 }
 
 ssu_err_t ubse_ssu_sdk_free(const char *device_path)
 {
     char command[SDK_COMMAND_SIZE];
+    const unsigned long long call_id = next_audit_id();
+    const long long start_ms = monotonic_ms();
     int rc;
-    ssu_err_t err = ensure_initialized();
+    ssu_err_t err;
 
+    sdk_audit_api_beginf(call_id, "free", "device_path=%s",
+                         device_path == NULL ? "(null)" : device_path);
+    err = ensure_initialized();
     if (err != SSU_OK) {
+        sdk_audit_api_endf(call_id, "free", start_ms, err, "stage=init");
         return err;
     }
 
     if (!token_is_safe(device_path)) {
+        set_last_errorf("free invalid device_path=%s",
+                        device_path == NULL ? "(null)" : device_path);
+        sdk_audit_api_endf(call_id, "free", start_ms, SSU_ERR_INVALID,
+                           "stage=validate");
         return SSU_ERR_INVALID;
     }
 
     rc = snprintf(command, sizeof(command), "FREE %s", device_path);
     if (rc < 0 || (size_t)rc >= sizeof(command)) {
+        set_last_errorf("free command too long device_path=%s", device_path);
+        sdk_audit_api_endf(call_id, "free", start_ms, SSU_ERR_INVALID,
+                           "stage=build_command");
         return SSU_ERR_INVALID;
     }
 
-    return request_ok_body(command, NULL, 0);
+    err = request_ok_body(command, NULL, 0);
+    sdk_audit_api_endf(call_id, "free", start_ms, err,
+                       "device_path=%s", device_path);
+    return err;
 }
 
 ssu_err_t ubse_ssu_sdk_list(ssu_resource_info_t *out,
@@ -691,35 +928,56 @@ ssu_err_t ubse_ssu_sdk_list(ssu_resource_info_t *out,
     uint32_t reported = 0;
     uint32_t capacity;
     uint32_t parsed = 0;
-    ssu_err_t err = ensure_initialized();
+    const unsigned long long call_id = next_audit_id();
+    const long long start_ms = monotonic_ms();
+    ssu_err_t err;
 
+    sdk_audit_api_beginf(call_id, "list", "out=%p capacity=%u",
+                         (void *)out,
+                         inout_count == NULL ? 0U : *inout_count);
+    err = ensure_initialized();
     if (err != SSU_OK) {
+        sdk_audit_api_endf(call_id, "list", start_ms, err, "stage=init");
         return err;
     }
 
     if (inout_count == NULL) {
+        set_last_errorf("list invalid args inout_count=NULL");
+        sdk_audit_api_endf(call_id, "list", start_ms, SSU_ERR_INVALID,
+                           "stage=validate");
         return SSU_ERR_INVALID;
     }
 
     memset(body, 0, sizeof(body));
     err = request_ok_body("LIST", body, sizeof(body));
     if (err != SSU_OK) {
+        sdk_audit_api_endf(call_id, "list", start_ms, err,
+                           "stage=manager");
         return err;
     }
 
     line = strtok_r(body, "\n", &save);
     if (line == NULL ||
         sscanf(line, "pool entries: %u", &reported) != 1) {
+        set_last_errorf("list invalid manager body first_line=%s",
+                        line == NULL ? "(null)" : line);
+        sdk_audit_api_endf(call_id, "list", start_ms, SSU_ERR_IO,
+                           "stage=parse_header");
         return SSU_ERR_IO;
     }
 
     capacity = *inout_count;
     *inout_count = reported;
     if (reported == 0) {
+        sdk_audit_api_endf(call_id, "list", start_ms, SSU_OK,
+                           "reported=0 written=0");
         return SSU_OK;
     }
 
     if (out == NULL || capacity < reported) {
+        sdk_audit_api_endf(call_id, "list", start_ms,
+                           SSU_ERR_BUFFER_TOO_SMALL,
+                           "reported=%u capacity=%u", reported, capacity);
         return SSU_ERR_BUFFER_TOO_SMALL;
     }
 
@@ -736,6 +994,10 @@ ssu_err_t ubse_ssu_sdk_list(ssu_resource_info_t *out,
                    item.state,
                    &used,
                    &total) != 5) {
+            set_last_errorf("list invalid resource row: %s", line);
+            sdk_audit_api_endf(call_id, "list", start_ms, SSU_ERR_IO,
+                               "stage=parse_row parsed=%u reported=%u",
+                               parsed, reported);
             return SSU_ERR_IO;
         }
 
@@ -744,7 +1006,14 @@ ssu_err_t ubse_ssu_sdk_list(ssu_resource_info_t *out,
         out[parsed++] = item;
     }
 
-    return parsed == reported ? SSU_OK : SSU_ERR_IO;
+    err = parsed == reported ? SSU_OK : SSU_ERR_IO;
+    if (err != SSU_OK) {
+        set_last_errorf("list incomplete resource rows parsed=%u reported=%u",
+                        parsed, reported);
+    }
+    sdk_audit_api_endf(call_id, "list", start_ms, err,
+                       "reported=%u written=%u", reported, parsed);
+    return err;
 }
 
 ssu_err_t ubse_ssu_sdk_allocate_result_get(
@@ -757,19 +1026,36 @@ ssu_err_t ubse_ssu_sdk_allocate_result_get(
     char *line;
     ssu_err_t err;
     int rc;
+    const unsigned long long call_id = next_audit_id();
+    const long long start_ms = monotonic_ms();
 
+    sdk_audit_api_beginf(call_id, "allocate_result_get",
+                         "request_id=%s out=%p",
+                         request_id == NULL ? "(null)" : request_id,
+                         (void *)out);
     err = ensure_initialized();
     if (err != SSU_OK) {
+        sdk_audit_api_endf(call_id, "allocate_result_get", start_ms, err,
+                           "stage=init");
         return err;
     }
 
     if (!token_is_safe(request_id) || out == NULL) {
+        set_last_errorf("allocate_result_get invalid args request_id=%s out=%p",
+                        request_id == NULL ? "(null)" : request_id,
+                        (void *)out);
+        sdk_audit_api_endf(call_id, "allocate_result_get", start_ms,
+                           SSU_ERR_INVALID, "stage=validate");
         return SSU_ERR_INVALID;
     }
 
     rc = snprintf(command, sizeof(command), "ALLOCATE_RESULT %s",
                   request_id);
     if (rc < 0 || (size_t)rc >= sizeof(command)) {
+        set_last_errorf("allocate_result_get command too long request_id=%s",
+                        request_id);
+        sdk_audit_api_endf(call_id, "allocate_result_get", start_ms,
+                           SSU_ERR_INVALID, "stage=build_command");
         return SSU_ERR_INVALID;
     }
 
@@ -779,6 +1065,8 @@ ssu_err_t ubse_ssu_sdk_allocate_result_get(
     if (err != SSU_OK) {
         out->status = err;
         copy_cstr(out->error_message, sizeof(out->error_message), body);
+        sdk_audit_api_endf(call_id, "allocate_result_get", start_ms, err,
+                           "stage=manager request_id=%s", request_id);
         return err;
     }
 
@@ -786,6 +1074,10 @@ ssu_err_t ubse_ssu_sdk_allocate_result_get(
     line = strtok_r(body, "\n", &save);
     if (line == NULL) {
         out->status = SSU_ERR_IO;
+        set_last_errorf("allocate_result_get response missing device_path request_id=%s",
+                        request_id);
+        sdk_audit_api_endf(call_id, "allocate_result_get", start_ms,
+                           SSU_ERR_IO, "stage=parse_device");
         return SSU_ERR_IO;
     }
     copy_cstr(out->device_path, sizeof(out->device_path), line);
@@ -806,11 +1098,20 @@ ssu_err_t ubse_ssu_sdk_allocate_result_get(
                    &length,
                    &lba) != 6) {
             out->status = SSU_ERR_IO;
+            set_last_errorf("allocate_result_get invalid physical row request_id=%s row=%s",
+                            request_id, line);
+            sdk_audit_api_endf(call_id, "allocate_result_get", start_ms,
+                               SSU_ERR_IO,
+                               "stage=parse_physical device_path=%s",
+                               out->device_path);
             return SSU_ERR_IO;
         }
 
         if (index >= SSU_API_MAX_PHYSICAL_DISKS) {
             out->status = SSU_ERR_BUFFER_TOO_SMALL;
+            sdk_audit_api_endf(call_id, "allocate_result_get", start_ms,
+                               SSU_ERR_BUFFER_TOO_SMALL,
+                               "stage=physical_limit index=%u", index);
             return SSU_ERR_BUFFER_TOO_SMALL;
         }
 
@@ -823,6 +1124,10 @@ ssu_err_t ubse_ssu_sdk_allocate_result_get(
         }
     }
 
+    sdk_audit_api_endf(call_id, "allocate_result_get", start_ms, SSU_OK,
+                       "request_id=%s device_path=%s physical_disks=%u",
+                       request_id, out->device_path,
+                       out->physical_disk_count);
     return SSU_OK;
 }
 
@@ -830,46 +1135,82 @@ ssu_err_t ubse_ssu_sdk_mount(const char *device_path,
                              const char *host_id)
 {
     char command[SDK_COMMAND_SIZE];
+    const unsigned long long call_id = next_audit_id();
+    const long long start_ms = monotonic_ms();
     int rc;
-    ssu_err_t err = ensure_initialized();
+    ssu_err_t err;
 
+    sdk_audit_api_beginf(call_id, "mount", "device_path=%s host_id=%s",
+                         device_path == NULL ? "(null)" : device_path,
+                         host_id == NULL ? "(null)" : host_id);
+    err = ensure_initialized();
     if (err != SSU_OK) {
+        sdk_audit_api_endf(call_id, "mount", start_ms, err, "stage=init");
         return err;
     }
 
     if (!token_is_safe(device_path) || !token_is_safe(host_id)) {
+        set_last_errorf("mount invalid args device_path=%s host_id=%s",
+                        device_path == NULL ? "(null)" : device_path,
+                        host_id == NULL ? "(null)" : host_id);
+        sdk_audit_api_endf(call_id, "mount", start_ms, SSU_ERR_INVALID,
+                           "stage=validate");
         return SSU_ERR_INVALID;
     }
 
     rc = snprintf(command, sizeof(command), "MOUNT_DEV %s %s",
                   device_path, host_id);
     if (rc < 0 || (size_t)rc >= sizeof(command)) {
+        set_last_errorf("mount command too long device_path=%s host_id=%s",
+                        device_path, host_id);
+        sdk_audit_api_endf(call_id, "mount", start_ms, SSU_ERR_INVALID,
+                           "stage=build_command");
         return SSU_ERR_INVALID;
     }
 
-    return request_ok_body(command, NULL, 0);
+    err = request_ok_body(command, NULL, 0);
+    sdk_audit_api_endf(call_id, "mount", start_ms, err,
+                       "device_path=%s host_id=%s", device_path, host_id);
+    return err;
 }
 
 ssu_err_t ubse_ssu_sdk_unmount(const char *device_path)
 {
     char command[SDK_COMMAND_SIZE];
+    const unsigned long long call_id = next_audit_id();
+    const long long start_ms = monotonic_ms();
     int rc;
-    ssu_err_t err = ensure_initialized();
+    ssu_err_t err;
 
+    sdk_audit_api_beginf(call_id, "unmount", "device_path=%s",
+                         device_path == NULL ? "(null)" : device_path);
+    err = ensure_initialized();
     if (err != SSU_OK) {
+        sdk_audit_api_endf(call_id, "unmount", start_ms, err, "stage=init");
         return err;
     }
 
     if (!token_is_safe(device_path)) {
+        set_last_errorf("unmount invalid device_path=%s",
+                        device_path == NULL ? "(null)" : device_path);
+        sdk_audit_api_endf(call_id, "unmount", start_ms, SSU_ERR_INVALID,
+                           "stage=validate");
         return SSU_ERR_INVALID;
     }
 
     rc = snprintf(command, sizeof(command), "UNMOUNT %s", device_path);
     if (rc < 0 || (size_t)rc >= sizeof(command)) {
+        set_last_errorf("unmount command too long device_path=%s",
+                        device_path);
+        sdk_audit_api_endf(call_id, "unmount", start_ms,
+                           SSU_ERR_INVALID, "stage=build_command");
         return SSU_ERR_INVALID;
     }
 
-    return request_ok_body(command, NULL, 0);
+    err = request_ok_body(command, NULL, 0);
+    sdk_audit_api_endf(call_id, "unmount", start_ms, err,
+                       "device_path=%s", device_path);
+    return err;
 }
 
 const char *ubse_ssu_sdk_last_error(void)
