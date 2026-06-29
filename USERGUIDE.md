@@ -396,7 +396,7 @@ int main()
     ssu_api_allocate_req_t  req  = {};
     ssu_api_allocate_resp_t resp = {};
     req.size_bytes            = 512ULL * 1024 * 1024;   // 512 MiB
-    req.disk_name             = "demo-disk";             // 可选；最长 27 个字符；NULL = /dev/ssu/ssuN
+    req.disk_name             = "/dev/ssu/demo-disk";    // 可选；也可只传 "demo-disk"
     req.user_id               = "user-demo";
     req.physical_disk_count   = 0;                       // 0 = 默认单盘
     req.logical_disk_aggregate= 1;                       // 1 = 开聚合（默认）
@@ -459,7 +459,7 @@ LD_LIBRARY_PATH=./build-lbc/src/user/sdk ./my_app
 | `ubse_ssu_sdk_entry()` | `dlopen` 主入口，返回 `ubse_ssu_sdk_ops_t` 函数表 |
 | `sdk->init(opts)` | 初始化 SDK；`opts` 可传 `NULL` 使用默认 manager socket |
 | `sdk->fini()` | 释放 SDK 进程内状态；调用后再 `dlclose` |
-| `sdk->allocate` | 申请空间，返回 `request_id`（异步）；`req.disk_name` 可指定逻辑盘名并参与幂等 |
+| `sdk->allocate` | 申请空间，返回 `request_id`（异步）；`req.disk_name` 可传 `name` 或 `/dev/ssu/name`，并参与幂等 |
 | `sdk->allocate_result_get` | 按 `request_id` 取逻辑设备路径 + 物理盘 LBA 明细 |
 | `sdk->mount(device_path, host)` | 挂成 `allocate-result-get` 返回的 `/dev/ssu/*` |
 | `sdk->unmount(device_path)` | 解挂载（保留数据） |

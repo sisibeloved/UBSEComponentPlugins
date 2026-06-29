@@ -16,6 +16,7 @@
 #define SDK_LAST_ERROR_SIZE 512U
 #define SDK_LOG_MESSAGE_SIZE 1024U
 #define SDK_SETTLE_AFTER_DATA_MS 20
+#define SDK_LOGICAL_DEV_PREFIX "/dev/ssu/"
 
 static int sdk_initialized;
 static char sdk_socket_path[256];
@@ -58,6 +59,42 @@ static int token_is_safe(const char *s)
         }
     }
 
+    return 1;
+}
+
+static int normalize_disk_name(const char *input,
+                               char *buf,
+                               size_t n,
+                               const char **out)
+{
+    const char *name;
+    const size_t prefix_len = strlen(SDK_LOGICAL_DEV_PREFIX);
+
+    if (buf == NULL || n == 0 || out == NULL) {
+        return 0;
+    }
+
+    if (is_empty_string(input)) {
+        *out = "-";
+        return 1;
+    }
+
+    name = input;
+    if (strncmp(input, SDK_LOGICAL_DEV_PREFIX, prefix_len) == 0) {
+        name = input + prefix_len;
+        if (is_empty_string(name) || strchr(name, '/') != NULL) {
+            return 0;
+        }
+    } else if (strchr(input, '/') != NULL) {
+        return 0;
+    }
+
+    if (!token_is_safe(name) || strlen(name) >= n) {
+        return 0;
+    }
+
+    copy_cstr(buf, n, name);
+    *out = buf;
     return 1;
 }
 
@@ -786,6 +823,7 @@ ssu_err_t ubse_ssu_sdk_allocate(const ssu_api_allocate_req_t *req,
                                 ssu_api_allocate_resp_t *out)
 {
     char host_list[256];
+    char disk_name_buf[256];
     char command[SDK_COMMAND_SIZE];
     char body[SDK_RESPONSE_SIZE];
     const char *user;
@@ -835,7 +873,15 @@ ssu_err_t ubse_ssu_sdk_allocate(const ssu_api_allocate_req_t *req,
     }
 
     user = is_empty_string(req->user_id) ? "-" : req->user_id;
-    disk_name = is_empty_string(req->disk_name) ? "-" : req->disk_name;
+    if (!normalize_disk_name(req->disk_name, disk_name_buf,
+                             sizeof(disk_name_buf), &disk_name)) {
+        set_last_errorf("allocate invalid disk_name=%s hint=use NAME or /dev/ssu/NAME",
+                        req->disk_name == NULL ? "(null)" : req->disk_name);
+        sdk_audit_api_endf(call_id, "allocate", start_ms,
+                           SSU_ERR_INVALID, "stage=disk_name");
+        return SSU_ERR_INVALID;
+    }
+
     if (!token_is_safe(user) || !token_is_safe(disk_name)) {
         set_last_errorf("allocate invalid token user=%s disk_name=%s",
                         user, disk_name);
@@ -877,7 +923,8 @@ ssu_err_t ubse_ssu_sdk_allocate(const ssu_api_allocate_req_t *req,
     }
 
     sdk_audit_api_endf(call_id, "allocate", start_ms, SSU_OK,
-                       "request_id=%s", out->request_id);
+                       "request_id=%s disk_name=%s", out->request_id,
+                       disk_name);
     return SSU_OK;
 }
 

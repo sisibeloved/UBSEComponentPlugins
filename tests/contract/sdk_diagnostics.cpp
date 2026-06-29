@@ -425,7 +425,7 @@ static int expect_success_audit_log(const ubse_ssu_sdk_ops_t *sdk,
     req.allocation_type = SSU_SHARE_EXCLUSIVE;
     req.host_ids = hosts;
     req.host_count = 1;
-    req.disk_name = "audit-disk";
+    req.disk_name = "/dev/ssu/audit-disk";
     if (!failed && sdk->allocate(&req, &resp) != SSU_OK) {
         fputs("sdk allocate failed in audit flow\n", stderr);
         failed = 1;
@@ -477,6 +477,7 @@ static int expect_success_audit_log(const ubse_ssu_sdk_ops_t *sdk,
     failed |= expect_contains(log_text, "audit api=allocate event=begin");
     failed |= expect_contains(log_text, "audit api=allocate event=end result=SSU_OK(0)");
     failed |= expect_contains(log_text, "request_id=req-audit-0");
+    failed |= expect_contains(log_text, "command=\"ALLOCATE 1048576 0 1 1 user-audit host0 audit-disk\"");
     failed |= expect_contains(log_text, "audit api=allocate_result_get event=begin");
     failed |= expect_contains(log_text, "audit api=allocate_result_get event=end result=SSU_OK(0)");
     failed |= expect_contains(log_text, "device_path=/dev/ssu/audit-disk");

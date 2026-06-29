@@ -85,7 +85,7 @@ int main(int argc, char **argv)
     const char *hosts[] = {"local"};
     ssu_api_allocate_req_t req = {};
     req.size_bytes = 512ULL * 1024ULL * 1024ULL;
-    req.disk_name = "sdk-demo-disk";
+    req.disk_name = "/dev/ssu/sdk-demo-disk";
     req.user_id = "user-demo";
     req.physical_disk_count = 0;
     req.logical_disk_aggregate = 1;
