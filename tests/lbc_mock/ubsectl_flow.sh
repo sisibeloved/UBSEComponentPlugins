@@ -21,6 +21,7 @@ cat > "$config_file" <<EOF
 dev_dir=$dev_dir
 configfs_dir=$configfs_dir
 log_file=$log_file
+resource_bytes=1073741824
 EOF
 
 test ! -e "$prefix/mock/ssu_lbc_mock.conf"
@@ -109,9 +110,11 @@ SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
     grep -q '^pool entries: 3'
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
     grep -q '^lbc-mock-ssu2[[:space:]]\+lbc-mock-host2[[:space:]]\+ONLINE'
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
+    grep -q '^lbc-mock-ssu0[[:space:]]\+lbc-mock-host0[[:space:]]\+ONLINE[[:space:]]\+0/1073741824$'
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" alloc \
-    --size 512M --stripe --share exclusive --out "$aid_file"
+    --size 768M --stripe --share exclusive --out "$aid_file"
 aid=$(cat "$aid_file")
 test "$aid" = "alloc-0"
 
@@ -164,7 +167,7 @@ grep -q 'setup nqn.2025-01.io.ssu:m0 4420' "$log_file"
 grep -q "config file loaded: $config_file" "$log_file"
 grep -q "config path=$config_file prefix=$prefix" "$log_file"
 grep -q 'run cwd=' "$log_file"
-grep -q -- '--nsze 1048576' "$log_file"
+grep -q -- '--nsze 1572864' "$log_file"
 grep -q -- '--nsze 8' "$log_file"
 grep -q -- '--nsid 1' "$log_file"
 grep -q 'target ready subnqn=nqn.2025-01.io.ssu:m0 port=4420' "$log_file"

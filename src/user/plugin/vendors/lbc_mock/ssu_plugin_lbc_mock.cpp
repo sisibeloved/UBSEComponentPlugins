@@ -19,9 +19,8 @@
 
 #define LBC_MOCK_MAX_NAMESPACES 32U
 #define LBC_MOCK_MAX_MOUNTS 32U
-#define LBC_MOCK_RESOURCE_NSZE 1048576ULL
 #define LBC_MOCK_SECTOR_SIZE 512ULL
-#define LBC_MOCK_TOTAL_BYTES (LBC_MOCK_RESOURCE_NSZE * LBC_MOCK_SECTOR_SIZE)
+#define LBC_MOCK_DEFAULT_RESOURCE_BYTES UINT64_MAX
 #define LBC_MOCK_SUBNQN_MAX 31U
 #define LBC_MOCK_DEFAULT_SSU_COUNT 3U
 #define LBC_MOCK_DEFAULT_CONFIG_PATH "/etc/ubse/ssu_lbc_mock.conf"
@@ -35,6 +34,7 @@ typedef struct {
     char dev_dir[256];
     char configfs_dir[256];
     char log_file[256];
+    uint64_t resource_bytes;
 } lbc_mock_config_t;
 
 typedef struct {
@@ -64,6 +64,7 @@ static lbc_mock_config_t lbc_config = {
     "/dev",
     "/sys/kernel/config/nvmet/subsystems",
     "/tmp/ubse-lbc-mock.log",
+    LBC_MOCK_DEFAULT_RESOURCE_BYTES,
 };
 static lbc_mock_namespace_t namespaces[LBC_MOCK_MAX_NAMESPACES];
 static lbc_mock_mount_t mounts[LBC_MOCK_MAX_MOUNTS];
@@ -161,11 +162,31 @@ static char *trim_ascii_space(char *s)
     return s;
 }
 
+static int parse_config_u64(const char *value, uint64_t *out)
+{
+    char *end = NULL;
+    unsigned long long parsed;
+
+    if (is_empty_string(value) || out == NULL) {
+        return 0;
+    }
+
+    errno = 0;
+    parsed = strtoull(value, &end, 10);
+    if (errno != 0 || end == value || *end != '\0' || parsed == 0) {
+        return 0;
+    }
+
+    *out = (uint64_t)parsed;
+    return 1;
+}
+
 static void apply_config_pair(const char *key, const char *value)
 {
     char *end = NULL;
     unsigned long port;
     unsigned long count;
+    uint64_t resource_bytes;
 
     if (strcmp(key, "dev_ip") == 0 || strcmp(key, "dev-ip") == 0) {
         copy_cstr(lbc_config.dev_ip, sizeof(lbc_config.dev_ip), value);
@@ -196,6 +217,18 @@ static void apply_config_pair(const char *key, const char *value)
         } else {
             lbc_mock_log("ignore invalid config ssu_count=%s max=%u",
                          value, LBC_MOCK_MAX_NAMESPACES);
+        }
+        return;
+    }
+
+    if (strcmp(key, "resource_bytes") == 0 ||
+        strcmp(key, "resource-bytes") == 0 ||
+        strcmp(key, "total_bytes") == 0 ||
+        strcmp(key, "total-bytes") == 0) {
+        if (parse_config_u64(value, &resource_bytes)) {
+            lbc_config.resource_bytes = resource_bytes;
+        } else {
+            lbc_mock_log("ignore invalid config resource_bytes=%s", value);
         }
         return;
     }
@@ -295,11 +328,12 @@ static void ensure_config_loaded(void)
     }
 
     load_config_file(config_path);
-    lbc_mock_log("config path=%s prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u ssu_count=%u log_file=%s",
+    lbc_mock_log("config path=%s prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u ssu_count=%u resource_bytes=%llu log_file=%s",
                  config_path, lbc_config.prefix, lbc_config.dev_dir,
                  lbc_config.configfs_dir, lbc_config.subnqn,
                  (unsigned int)lbc_config.port,
                  (unsigned int)lbc_config.resource_count,
+                 (unsigned long long)lbc_config.resource_bytes,
                  lbc_config.log_file);
 }
 
@@ -824,17 +858,19 @@ ssu_err_t ssu_lbc_mock_configure(const ssu_lbc_mock_config_t *config)
     copy_cstr(lbc_config.log_file, sizeof(lbc_config.log_file),
               is_empty_string(config->log_file) ?
                   "/tmp/ubse-lbc-mock.log" : config->log_file);
+    lbc_config.resource_bytes = LBC_MOCK_DEFAULT_RESOURCE_BYTES;
 
     memset(namespaces, 0, sizeof(namespaces));
     memset(mounts, 0, sizeof(mounts));
     next_nsid = 1;
     target_ready = 0;
     config_loaded = 1;
-    lbc_mock_log("configure prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u ssu_count=%u log_file=%s",
+    lbc_mock_log("configure prefix=%s dev_dir=%s configfs_dir=%s subnqn=%s port=%u ssu_count=%u resource_bytes=%llu log_file=%s",
                  lbc_config.prefix, lbc_config.dev_dir,
                  lbc_config.configfs_dir, lbc_config.subnqn,
                  (unsigned int)lbc_config.port,
                  (unsigned int)lbc_config.resource_count,
+                 (unsigned long long)lbc_config.resource_bytes,
                  lbc_config.log_file);
     return SSU_OK;
 }
@@ -867,7 +903,7 @@ static ssu_err_t lbc_mock_discover(ssu_resource_info_t *out,
         snprintf(out[i].host_id, sizeof(out[i].host_id),
                  "lbc-mock-host%u", i);
         copy_cstr(out[i].state, sizeof(out[i].state), "ONLINE");
-        out[i].total_bytes = LBC_MOCK_TOTAL_BYTES;
+        out[i].total_bytes = lbc_config.resource_bytes;
         out[i].used_bytes = 0;
     }
     *inout_count = lbc_config.resource_count;
