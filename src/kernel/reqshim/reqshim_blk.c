@@ -19,6 +19,22 @@
 #define SSU_REQSHIM_SECTOR_SHIFT 9U
 #define SSU_REQSHIM_SECTOR_SIZE (1U << SSU_REQSHIM_SECTOR_SHIFT)
 
+static const char *ssu_reqshim_op_name(enum req_op op)
+{
+    switch (op) {
+    case REQ_OP_READ:
+        return "READ";
+    case REQ_OP_WRITE:
+        return "WRITE";
+    case REQ_OP_FLUSH:
+        return "FLUSH";
+    case REQ_OP_DISCARD:
+        return "DISCARD";
+    default:
+        return "OTHER";
+    }
+}
+
 struct reqshim_logdev_slot {
     bool active;
     struct ssu_logdev_req req;
@@ -59,8 +75,14 @@ static blk_status_t ssu_reqshim_submit_bvec(
 {
     unsigned int done = 0;
 
-    if ((bvec->bv_len & (SSU_REQSHIM_SECTOR_SIZE - 1U)) != 0)
+    if ((bvec->bv_len & (SSU_REQSHIM_SECTOR_SIZE - 1U)) != 0) {
+        ssu_reqshim_warn_rl(
+            "unaligned bvec minor=%u op=%s logical_sector=%llu len=%u offset=%u\n",
+            slot->req.minor, ssu_reqshim_op_name(req_op(rq)),
+            (unsigned long long)*logical_sector, bvec->bv_len,
+            bvec->bv_offset);
         return BLK_STS_IOERR;
+    }
 
     while (done < bvec->bv_len) {
         struct ssu_map_entry entry;
@@ -76,12 +98,23 @@ static blk_status_t ssu_reqshim_submit_bvec(
         err = ssu_reqshim_translate_sector(slot->req.minor,
                                            (__u64)*logical_sector,
                                            &entry, &phys_sector);
-        if (err)
+        if (err) {
+            ssu_reqshim_warn_rl(
+                "translate failed minor=%u op=%s logical_sector=%llu err=%d\n",
+                slot->req.minor, ssu_reqshim_op_name(req_op(rq)),
+                (unsigned long long)*logical_sector, err);
             return ssu_reqshim_errno_to_blk_status(err);
+        }
 
         entry_end = entry.logical_sector + entry.length_sectors;
-        if ((__u64)*logical_sector >= entry_end)
+        if ((__u64)*logical_sector >= entry_end) {
+            ssu_reqshim_warn_rl(
+                "translate invalid range minor=%u logical_sector=%llu map_start=%llu map_len=%llu\n",
+                slot->req.minor, (unsigned long long)*logical_sector,
+                (unsigned long long)entry.logical_sector,
+                (unsigned long long)entry.length_sectors);
             return BLK_STS_IOERR;
+        }
 
         sectors_left = entry_end - (__u64)*logical_sector;
         bytes_left = bvec->bv_len - done;
@@ -93,15 +126,34 @@ static blk_status_t ssu_reqshim_submit_bvec(
 
         chunk = min(bytes_left, max_bytes);
         chunk &= ~(SSU_REQSHIM_SECTOR_SIZE - 1U);
-        if (chunk == 0)
+        if (chunk == 0) {
+            ssu_reqshim_warn_rl(
+                "zero chunk minor=%u logical_sector=%llu bytes_left=%u sectors_left=%llu\n",
+                slot->req.minor, (unsigned long long)*logical_sector,
+                bytes_left, (unsigned long long)sectors_left);
             return BLK_STS_IOERR;
+        }
+
+        ssu_reqshim_io(
+            "submit chunk minor=%u op=%s logical_sector=%llu bytes=%u phys_dev=%s nsid=%u phys_sector=%llu map_start=%llu map_len=%llu\n",
+            slot->req.minor, ssu_reqshim_op_name(req_op(rq)),
+            (unsigned long long)*logical_sector, chunk, entry.phys_dev,
+            entry.nsid, (unsigned long long)phys_sector,
+            (unsigned long long)entry.logical_sector,
+            (unsigned long long)entry.length_sectors);
 
         status = ssu_reqshim_phys_submit_bvec(&entry, (sector_t)phys_sector,
                                               rq->cmd_flags, bvec->bv_page,
                                               chunk,
                                               bvec->bv_offset + done);
-        if (status != BLK_STS_OK)
+        if (status != BLK_STS_OK) {
+            ssu_reqshim_warn_rl(
+                "phys submit failed minor=%u op=%s logical_sector=%llu bytes=%u phys_dev=%s phys_sector=%llu status=%u\n",
+                slot->req.minor, ssu_reqshim_op_name(req_op(rq)),
+                (unsigned long long)*logical_sector, chunk, entry.phys_dev,
+                (unsigned long long)phys_sector, status);
             return status;
+        }
 
         done += chunk;
         *logical_sector += chunk >> SSU_REQSHIM_SECTOR_SHIFT;
@@ -122,14 +174,29 @@ static void ssu_reqshim_rq_workfn(struct work_struct *work)
     blk_status_t status = BLK_STS_OK;
 
     if (!slot || !slot->active || blk_rq_is_passthrough(rq)) {
+        ssu_reqshim_warn_rl(
+            "request rejected slot=%p active=%d passthrough=%d op=%s sector=%llu bytes=%u\n",
+            slot, slot ? slot->active : 0, blk_rq_is_passthrough(rq),
+            ssu_reqshim_op_name(req_op(rq)),
+            (unsigned long long)blk_rq_pos(rq), blk_rq_bytes(rq));
         status = BLK_STS_IOERR;
         goto done;
     }
 
     if (req_op(rq) != REQ_OP_READ && req_op(rq) != REQ_OP_WRITE) {
+        ssu_reqshim_warn_rl(
+            "request unsupported minor=%u op=%s sector=%llu bytes=%u\n",
+            slot->req.minor, ssu_reqshim_op_name(req_op(rq)),
+            (unsigned long long)blk_rq_pos(rq), blk_rq_bytes(rq));
         status = BLK_STS_NOTSUPP;
         goto done;
     }
+
+    ssu_reqshim_io("work start minor=%u disk=%s op=%s sector=%llu bytes=%u segments=%u\n",
+                   slot->req.minor, slot->req.disk_name,
+                   ssu_reqshim_op_name(req_op(rq)),
+                   (unsigned long long)blk_rq_pos(rq), blk_rq_bytes(rq),
+                   blk_rq_nr_phys_segments(rq));
 
     rq_for_each_segment(bvec, rq, iter) {
         status = ssu_reqshim_submit_bvec(slot, rq, &bvec,
@@ -139,6 +206,11 @@ static void ssu_reqshim_rq_workfn(struct work_struct *work)
     }
 
 done:
+    ssu_reqshim_io("work done minor=%u op=%s start_sector=%llu end_sector=%llu status=%u\n",
+                   slot ? slot->req.minor : UINT_MAX,
+                   ssu_reqshim_op_name(req_op(rq)),
+                   (unsigned long long)blk_rq_pos(rq),
+                   (unsigned long long)logical_sector, status);
     blk_mq_end_request(rq, status);
     kfree(ctx);
 }
@@ -155,6 +227,19 @@ static blk_status_t ssu_reqshim_queue_rq(struct blk_mq_hw_ctx *hctx,
     blk_mq_start_request(bd->rq);
     ctx->rq = bd->rq;
     ctx->slot = hctx->queue->queuedata;
+    if (ctx->slot) {
+        ssu_reqshim_io(
+            "queue_rq minor=%u disk=%s op=%s sector=%llu bytes=%u segments=%u\n",
+            ctx->slot->req.minor, ctx->slot->req.disk_name,
+            ssu_reqshim_op_name(req_op(bd->rq)),
+            (unsigned long long)blk_rq_pos(bd->rq),
+            blk_rq_bytes(bd->rq), blk_rq_nr_phys_segments(bd->rq));
+    } else {
+        ssu_reqshim_warn_rl("queue_rq missing slot op=%s sector=%llu bytes=%u\n",
+                            ssu_reqshim_op_name(req_op(bd->rq)),
+                            (unsigned long long)blk_rq_pos(bd->rq),
+                            blk_rq_bytes(bd->rq));
+    }
     INIT_WORK(&ctx->work, ssu_reqshim_rq_workfn);
     queue_work(system_unbound_wq, &ctx->work);
     return BLK_STS_OK;
@@ -220,15 +305,31 @@ int ssu_reqshim_logdev_create(const struct ssu_logdev_req *req)
     int err;
 
     err = ssu_reqshim_validate_logdev_req(req);
-    if (err)
+    if (err) {
+        ssu_reqshim_warn(
+            "logdev create invalid minor=%u name=%s capacity=%llu block=%u err=%d\n",
+            req ? req->minor : UINT_MAX, req ? req->disk_name : "(null)",
+            req ? (unsigned long long)req->capacity_sectors : 0,
+            req ? req->logical_block_size : 0, err);
         return err;
+    }
 
-    if (reqshim_major <= 0)
+    if (reqshim_major <= 0) {
+        ssu_reqshim_warn("logdev create failed: block major unavailable\n");
         return -ENODEV;
+    }
+
+    ssu_reqshim_info(
+        "logdev create start minor=%u name=%s capacity_sectors=%llu logical_block=%u flags=0x%x\n",
+        req->minor, req->disk_name,
+        (unsigned long long)req->capacity_sectors,
+        req->logical_block_size, req->flags);
 
     mutex_lock(&logdev_lock);
     if (logdevs[req->minor].active) {
         mutex_unlock(&logdev_lock);
+        ssu_reqshim_warn("logdev create busy minor=%u name=%s\n",
+                         req->minor, req->disk_name);
         return -EBUSY;
     }
 
@@ -243,12 +344,17 @@ int ssu_reqshim_logdev_create(const struct ssu_logdev_req *req)
     slot->tag_set.flags = BLK_MQ_F_SHOULD_MERGE;
 
     err = blk_mq_alloc_tag_set(&slot->tag_set);
-    if (err)
+    if (err) {
+        ssu_reqshim_warn("logdev create tag_set failed minor=%u err=%d\n",
+                         req->minor, err);
         goto fail_clear;
+    }
 
     disk = blk_mq_alloc_disk(&slot->tag_set, slot);
     if (IS_ERR(disk)) {
         err = PTR_ERR(disk);
+        ssu_reqshim_warn("logdev create alloc_disk failed minor=%u err=%d\n",
+                         req->minor, err);
         goto fail_tag_set;
     }
 
@@ -263,11 +369,18 @@ int ssu_reqshim_logdev_create(const struct ssu_logdev_req *req)
     set_capacity(disk, req->capacity_sectors);
 
     err = add_disk(disk);
-    if (err)
+    if (err) {
+        ssu_reqshim_warn("logdev create add_disk failed minor=%u err=%d\n",
+                         req->minor, err);
         goto fail_disk;
+    }
 
     slot->active = true;
     mutex_unlock(&logdev_lock);
+    ssu_reqshim_info("logdev create success minor=%u disk=%s major=%d first_minor=%d capacity_sectors=%llu\n",
+                     req->minor, disk->disk_name, disk->major,
+                     disk->first_minor,
+                     (unsigned long long)req->capacity_sectors);
     return 0;
 
 fail_disk:
@@ -286,16 +399,23 @@ int ssu_reqshim_logdev_destroy(const struct ssu_logdev_req *req)
     struct reqshim_logdev_slot *slot;
     struct gendisk *disk;
 
-    if (!req || req->minor >= SSU_REQSHIM_MAX_LOGDEVS)
+    if (!req || req->minor >= SSU_REQSHIM_MAX_LOGDEVS) {
+        ssu_reqshim_warn("logdev destroy invalid minor=%u\n",
+                         req ? req->minor : UINT_MAX);
         return -EINVAL;
+    }
 
     mutex_lock(&logdev_lock);
     slot = &logdevs[req->minor];
     if (!slot->active) {
         mutex_unlock(&logdev_lock);
+        ssu_reqshim_warn("logdev destroy missing minor=%u\n", req->minor);
         return -ENOENT;
     }
 
+    ssu_reqshim_info("logdev destroy start minor=%u disk=%s\n",
+                     req->minor,
+                     slot->disk ? slot->disk->disk_name : "(none)");
     slot->active = false;
     disk = slot->disk;
     slot->disk = NULL;
@@ -308,15 +428,20 @@ int ssu_reqshim_logdev_destroy(const struct ssu_logdev_req *req)
     blk_mq_free_tag_set(&slot->tag_set);
     memset(slot, 0, sizeof(*slot));
     ssu_reqshim_map_clear_minor(req->minor);
+    ssu_reqshim_info("logdev destroy success minor=%u\n", req->minor);
     return 0;
 }
 
 int ssu_reqshim_blk_init(void)
 {
     reqshim_major = register_blkdev(0, SSU_REQSHIM_DISK_NAME);
-    if (reqshim_major <= 0)
+    if (reqshim_major <= 0) {
+        ssu_reqshim_warn("register_blkdev failed ret=%d\n", reqshim_major);
         return reqshim_major == 0 ? -EBUSY : reqshim_major;
+    }
 
+    ssu_reqshim_info("block major registered major=%d name=%s\n",
+                     reqshim_major, SSU_REQSHIM_DISK_NAME);
     return 0;
 }
 
@@ -334,6 +459,8 @@ void ssu_reqshim_blk_exit(void)
     }
 
     if (reqshim_major > 0) {
+        ssu_reqshim_info("block major unregister major=%d name=%s\n",
+                         reqshim_major, SSU_REQSHIM_DISK_NAME);
         unregister_blkdev(reqshim_major, SSU_REQSHIM_DISK_NAME);
         reqshim_major = 0;
     }

@@ -164,6 +164,21 @@ test(
   depends: [libubse_ssu_sdk],
 )
 
+sdk_diagnostics = executable(
+  'sdk_diagnostics',
+  sources: ['sdk_diagnostics.cpp'],
+  include_directories: inc,
+  dependencies: sdk_dlopen_deps,
+)
+
+test(
+  'sdk_diagnostics',
+  sdk_diagnostics,
+  args: [sdk_so_path],
+  depends: [libubse_ssu_sdk],
+  timeout: 5,
+)
+
 sdk_linkage = find_program('sdk_linkage.sh')
 
 test(

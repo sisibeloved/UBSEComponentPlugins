@@ -4,11 +4,26 @@
 #include <linux/blk_types.h>
 #include <linux/fs.h>
 #include <linux/mm_types.h>
+#include <linux/printk.h>
 
 #include "reqshim_uapi.h"
 
 #define SSU_REQSHIM_MAX_LOGDEVS 256U
 #define SSU_REQSHIM_MAX_MAPS 1024U
+
+extern bool ssu_reqshim_trace_io;
+
+#define ssu_reqshim_info(fmt, ...) \
+    pr_info("ssu_reqshim: " fmt, ##__VA_ARGS__)
+#define ssu_reqshim_warn(fmt, ...) \
+    pr_warn("ssu_reqshim: " fmt, ##__VA_ARGS__)
+#define ssu_reqshim_warn_rl(fmt, ...) \
+    pr_warn_ratelimited("ssu_reqshim: " fmt, ##__VA_ARGS__)
+#define ssu_reqshim_io(fmt, ...) \
+    do { \
+        if (ssu_reqshim_trace_io) \
+            pr_info_ratelimited("ssu_reqshim: io " fmt, ##__VA_ARGS__); \
+    } while (0)
 
 long ssu_reqshim_ioctl(struct file *file, unsigned int cmd,
                        unsigned long arg);

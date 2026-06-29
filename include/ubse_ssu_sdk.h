@@ -8,12 +8,18 @@ extern "C" {
 #endif
 
 #define UBSE_SSU_SDK_DEFAULT_SOCKET "/tmp/ubse-ssu-mgr.fifo"
+#define UBSE_SSU_SDK_DEFAULT_LOG "/tmp/ubse-ssu-sdk.log"
+#define UBSE_SSU_SDK_DEFAULT_RESPONSE_TIMEOUT_MS 5000U
 
 typedef struct {
     /* Set to sizeof(ubse_ssu_sdk_init_options_t). */
     size_t struct_size;
     /* Optional. NULL or empty uses SSU_MGR_SOCKET, then the default socket. */
     const char *socket_path;
+    /* Optional. NULL or empty uses UBSE_SSU_SDK_LOG, then the default log. */
+    const char *log_path;
+    /* Optional. 0 uses UBSE_SSU_SDK_RESPONSE_TIMEOUT_MS, then the default. */
+    uint32_t response_timeout_ms;
 } ubse_ssu_sdk_init_options_t;
 
 typedef struct {
@@ -33,6 +39,7 @@ typedef struct {
     ssu_err_t (*mount)(const char *device_path,
                        const char *host_id);
     ssu_err_t (*unmount)(const char *device_path);
+    const char *(*last_error)(void);
 } ubse_ssu_sdk_ops_t;
 
 ssu_err_t ubse_ssu_sdk_init(const ubse_ssu_sdk_init_options_t *opts);
@@ -49,6 +56,7 @@ ssu_err_t ubse_ssu_sdk_allocate_result_get(
 ssu_err_t ubse_ssu_sdk_mount(const char *device_path,
                              const char *host_id);
 ssu_err_t ubse_ssu_sdk_unmount(const char *device_path);
+const char *ubse_ssu_sdk_last_error(void);
 
 /* dlopen users only need to dlsym this single entry point. */
 const ubse_ssu_sdk_ops_t *ubse_ssu_sdk_entry(void);

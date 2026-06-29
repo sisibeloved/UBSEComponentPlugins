@@ -78,7 +78,11 @@ int main(int argc, char **argv)
     failed |= expect_contains("reqshim_iface", iface,
                               "SSU_IOC_MAP_ADD");
     failed |= expect_contains("reqshim_iface", iface,
+                              "ReqShim map add logical_dev=%s");
+    failed |= expect_contains("reqshim_iface", iface,
                               "SSU_IOC_MAP_DEL");
+    failed |= expect_contains("reqshim_iface", iface,
+                              "ReqShim map del logical_dev=%s");
     failed |= expect_contains("reqshim_iface", iface,
                               "SSU_IOC_LOGDEV_DESTROY");
     failed |= expect_contains("reqshim_ioctl", ioctl,

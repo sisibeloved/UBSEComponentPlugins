@@ -437,8 +437,20 @@ static ssu_err_t mount_logdev_with_minor(
         ops->close_fn(fd);
         return err;
     }
+    reqshim_log(log_fn, log_ctx,
+                "ReqShim logdev create logical_dev=%s minor=%u disk_name=%s capacity_sectors=%llu logical_block=%u maps=%u",
+                logical_dev, minor, logdev_req.disk_name,
+                (unsigned long long)logdev_req.capacity_sectors,
+                logdev_req.logical_block_size, map_count);
 
     for (i = 0; i < entries.size(); i++) {
+        reqshim_log(log_fn, log_ctx,
+                    "ReqShim map add logical_dev=%s minor=%u logical_sector=%llu len=%llu phys_dev=%s nsid=%u phys_sector=%llu",
+                    logical_dev, entries[i].logical_minor,
+                    (unsigned long long)entries[i].logical_sector,
+                    (unsigned long long)entries[i].length_sectors,
+                    entries[i].phys_dev, entries[i].nsid,
+                    (unsigned long long)entries[i].phys_sector);
         err = do_ioctl(ops, fd, SSU_IOC_MAP_ADD, &entries[i],
                        "SSU_IOC_MAP_ADD", log_fn, log_ctx);
         if (err != SSU_OK) {
@@ -557,6 +569,13 @@ static ssu_err_t unmount_logdev_with_minor(
     }
 
     for (i = 0; i < entries.size(); i++) {
+        reqshim_log(log_fn, log_ctx,
+                    "ReqShim map del logical_dev=%s minor=%u logical_sector=%llu len=%llu phys_dev=%s nsid=%u phys_sector=%llu",
+                    logical_dev, entries[i].logical_minor,
+                    (unsigned long long)entries[i].logical_sector,
+                    (unsigned long long)entries[i].length_sectors,
+                    entries[i].phys_dev, entries[i].nsid,
+                    (unsigned long long)entries[i].phys_sector);
         do_ioctl(ops, fd, SSU_IOC_MAP_DEL, &entries[i],
                  "SSU_IOC_MAP_DEL", log_fn, log_ctx);
     }

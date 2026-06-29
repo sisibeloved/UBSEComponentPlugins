@@ -55,14 +55,15 @@ int main(int argc, char **argv)
         sdk->init == NULL || sdk->fini == NULL ||
         sdk->allocate == NULL || sdk->free == NULL ||
         sdk->list == NULL || sdk->allocate_result_get == NULL ||
-        sdk->mount == NULL || sdk->unmount == NULL) {
+        sdk->mount == NULL || sdk->unmount == NULL ||
+        sdk->last_error == NULL) {
         fputs("ubse_ssu_sdk_entry returned incomplete ops table\n", stderr);
         dlclose(handle);
         return 1;
     }
 
     ubse_ssu_sdk_init_options_t opts = {};
-    opts.struct_size = sizeof(opts) - 1U;
+    opts.struct_size = offsetof(ubse_ssu_sdk_init_options_t, socket_path);
     if (expect_err("bad init options", sdk->init(&opts),
                    SSU_ERR_INVALID) != 0) {
         dlclose(handle);
