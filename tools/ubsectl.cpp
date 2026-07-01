@@ -465,18 +465,22 @@ static int print_allocate_result(const ssu_api_allocate_result_info_t *result,
         return 1;
     }
 
-    if (out_path != NULL) {
-        printf("%s\n", result->device_path);
-    }
+    printf("physical_disks=%u\n", result->physical_disk_count);
 
     for (i = 0; i < result->physical_disk_count; i++) {
-        printf("physical %u %s %s %llu %llu lba=%llu\n",
+        unsigned long long physical_lba =
+            (unsigned long long)result->physical_disks[i].lba;
+        unsigned long long physical_offset =
+            physical_lba << 9;
+
+        printf("physical[%u]: ssu_id=%s ns_id=%s logical_offset_bytes=%llu length_bytes=%llu physical_lba_512b=%llu physical_offset_bytes=%llu\n",
                i,
                result->physical_disks[i].ssu_id,
                result->physical_disks[i].ns_id,
                (unsigned long long)result->physical_disks[i].logical_offset,
                (unsigned long long)result->physical_disks[i].length,
-               (unsigned long long)result->physical_disks[i].lba);
+               physical_lba,
+               physical_offset);
     }
 
     return 0;

@@ -86,7 +86,7 @@ sudo insmod build-lbc-kernel/src/kernel/reqshim/ssu_reqshim.ko trace_io=1
 echo 1 | sudo tee /sys/module/ssu_reqshim/parameters/trace_io
 ```
 
-`trace_io=1` 会在 dmesg 里打印每个逻辑 IO 的入队、映射、物理 bio 下发结果，信息比较多，只建议调试时打开。
+`trace_io=1` 会在 dmesg 里打印每个逻辑 IO 的入队、映射、物理 bio 下发结果。fio 这类高频压测会产生大量日志，只建议定位数据面问题时临时打开。
 
 > 不加载 ReqShim 也能做控制面验收（allocate/list/allocate-result-get/free 都能跑）；只有 `mount`（建 `/dev/ssu/*`）和真正的数据读写需要它。ReqShim 没加载时 `mount` 会明确报 `SSU_ERR_KERNEL (-6)`。
 
@@ -184,10 +184,23 @@ printf '%s\n' "$RESULT"
 
 ```
 /dev/ssu/demo-disk
-physical 0 lbc-mock-ssu0 1 0 536870912 lba=0
+physical_disks=1
+physical[0]: ssu_id=lbc-mock-ssu0 ns_id=1 logical_offset_bytes=0 length_bytes=536870912 physical_lba_512b=0 physical_offset_bytes=0
 ```
 
-`physical` 行字段：序号、SSU ID、namespace ID、逻辑偏移、长度、物理起始 LBA。逻辑偏移是这块逻辑盘内的 offset；物理起始 LBA 是该物理 namespace/物理盘上的起始 sector，单位是 512B sector。
+字段含义：
+
+| 字段 | 含义 |
+| ---- | ---- |
+| 第一行 `/dev/ssu/...` | 逻辑块设备路径，后续 `mount`、`unmount`、`free` 都用这个路径 |
+| `physical_disks` | 这个逻辑盘由几段物理 namespace/物理盘空间组成 |
+| `physical[N]` | 第 N 段物理映射，从 0 开始编号 |
+| `ssu_id` | 物理 SSU 资源 ID |
+| `ns_id` | 该物理 SSU 上创建出来的 namespace ID |
+| `logical_offset_bytes` | 这段物理空间映射到逻辑盘内的起始偏移，单位是字节 |
+| `length_bytes` | 这段映射覆盖的逻辑长度，单位是字节 |
+| `physical_lba_512b` | 物理 namespace 内的起始 LBA，单位是 512B sector |
+| `physical_offset_bytes` | 同一个物理起点换算成字节，等于 `physical_lba_512b * 512` |
 
 > 脚本里**只取第一行**当作 `$DEV`，别把整段输出当设备路径。
 
@@ -486,12 +499,13 @@ sudo ./build-lbc/tools/ubsectl allocate --size 768M --physical-disks 3 \
 
 ```text
 /dev/ssu/ssu1
-physical 0 lbc-mock-ssu0 1 0 268435456 lba=0
-physical 1 lbc-mock-ssu1 2 268435456 268435456 lba=0
-physical 2 lbc-mock-ssu2 3 536870912 268435456 lba=0
+physical_disks=3
+physical[0]: ssu_id=lbc-mock-ssu0 ns_id=1 logical_offset_bytes=0 length_bytes=268435456 physical_lba_512b=0 physical_offset_bytes=0
+physical[1]: ssu_id=lbc-mock-ssu1 ns_id=2 logical_offset_bytes=268435456 length_bytes=268435456 physical_lba_512b=0 physical_offset_bytes=0
+physical[2]: ssu_id=lbc-mock-ssu2 ns_id=3 logical_offset_bytes=536870912 length_bytes=268435456 physical_lba_512b=0 physical_offset_bytes=0
 ```
 
-第一次在这些物理盘上分配时，物理起始 LBA 通常是 0；如果同一物理盘上已有未释放分配，后续 `lba=` 会从该物理盘已用位置继续推进。
+第一次在这些物理盘上分配时，物理起始 LBA 通常是 0；如果同一物理盘上已有未释放分配，后续 `physical_lba_512b` / `physical_offset_bytes` 会从该物理盘已用位置继续推进。
 
 挂载后，`query --type logdev` 会看到同一个 `/dev/ssu/ssu1` 对应 3 条物理映射：
 

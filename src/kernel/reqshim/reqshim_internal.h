@@ -22,7 +22,7 @@ extern bool ssu_reqshim_trace_io;
 #define ssu_reqshim_io(fmt, ...) \
     do { \
         if (ssu_reqshim_trace_io) \
-            pr_info_ratelimited("ssu_reqshim: io " fmt, ##__VA_ARGS__); \
+            pr_info("ssu_reqshim: io " fmt, ##__VA_ARGS__); \
     } while (0)
 
 long ssu_reqshim_ioctl(struct file *file, unsigned int cmd,

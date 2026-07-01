@@ -49,6 +49,7 @@ int main(int argc, char **argv)
     std::string map;
     std::string phys;
     std::string main;
+    std::string internal;
     int failed = 0;
 
     if (argc != 2) {
@@ -62,15 +63,20 @@ int main(int argc, char **argv)
     map = read_file(root + "/src/kernel/reqshim/reqshim_map.c");
     phys = read_file(root + "/src/kernel/reqshim/reqshim_phys.c");
     main = read_file(root + "/src/kernel/reqshim/reqshim_main.c");
+    internal = read_file(root + "/src/kernel/reqshim/reqshim_internal.h");
 
     if (blk.empty() || cmd.empty() || map.empty() || phys.empty() ||
-        main.empty()) {
+        main.empty() || internal.empty()) {
         return 1;
     }
 
     failed |= expect_contains("reqshim_main", main, "ssu_reqshim_blk_init");
     failed |= expect_contains("reqshim_main", main, "ssu_reqshim_blk_exit");
     failed |= expect_contains("reqshim_main", main, "module_param_named(trace_io");
+    failed |= expect_contains("reqshim_internal", internal,
+                              "pr_info(\"ssu_reqshim: io ");
+    failed |= expect_not_contains("reqshim_internal", internal,
+                                  "pr_info_ratelimited(\"ssu_reqshim: io ");
     failed |= expect_contains("reqshim_blk", blk, "register_blkdev");
     failed |= expect_contains("reqshim_blk", blk, "\"ssu/%s\"");
     failed |= expect_contains("reqshim_blk", blk, "blk_mq_ops");

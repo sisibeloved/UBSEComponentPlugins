@@ -146,9 +146,10 @@ test "$rid" = "alloc-1"
 result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$rid")
 dev=$(printf '%s\n' "$result" | sed -n '1p')
 test "$dev" = "/dev/ssu/ssu1"
-printf '%s\n' "$result" | grep -q '^physical 0 lbc-mock-ssu0 1 0 4096 lba=0$'
-printf '%s\n' "$result" | grep -q '^physical 1 lbc-mock-ssu1 2 4096 4096 lba=0$'
-printf '%s\n' "$result" | grep -q '^physical 2 lbc-mock-ssu2 3 8192 4096 lba=0$'
+printf '%s\n' "$result" | grep -q '^physical_disks=3$'
+printf '%s\n' "$result" | grep -q '^physical\[0\]: ssu_id=lbc-mock-ssu0 ns_id=1 logical_offset_bytes=0 length_bytes=4096 physical_lba_512b=0 physical_offset_bytes=0$'
+printf '%s\n' "$result" | grep -q '^physical\[1\]: ssu_id=lbc-mock-ssu1 ns_id=2 logical_offset_bytes=4096 length_bytes=4096 physical_lba_512b=0 physical_offset_bytes=0$'
+printf '%s\n' "$result" | grep -q '^physical\[2\]: ssu_id=lbc-mock-ssu2 ns_id=3 logical_offset_bytes=8192 length_bytes=4096 physical_lba_512b=0 physical_offset_bytes=0$'
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
@@ -235,9 +236,9 @@ test "$second_named" = "alloc-3"
 second_result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$second_named")
 second_dev=$(printf '%s\n' "$second_result" | sed -n '1p')
 test "$second_dev" = "/dev/ssu/data-b"
-printf '%s\n' "$second_result" | grep -Eq '^physical 0 lbc-mock-ssu0 [0-9]+ 0 4096 lba=8$'
-printf '%s\n' "$second_result" | grep -Eq '^physical 1 lbc-mock-ssu1 [0-9]+ 4096 4096 lba=8$'
-printf '%s\n' "$second_result" | grep -Eq '^physical 2 lbc-mock-ssu2 [0-9]+ 8192 4096 lba=0$'
+printf '%s\n' "$second_result" | grep -Eq '^physical\[0\]: ssu_id=lbc-mock-ssu0 ns_id=[0-9]+ logical_offset_bytes=0 length_bytes=4096 physical_lba_512b=8 physical_offset_bytes=4096$'
+printf '%s\n' "$second_result" | grep -Eq '^physical\[1\]: ssu_id=lbc-mock-ssu1 ns_id=[0-9]+ logical_offset_bytes=4096 length_bytes=4096 physical_lba_512b=8 physical_offset_bytes=4096$'
+printf '%s\n' "$second_result" | grep -Eq '^physical\[2\]: ssu_id=lbc-mock-ssu2 ns_id=[0-9]+ logical_offset_bytes=8192 length_bytes=4096 physical_lba_512b=0 physical_offset_bytes=0$'
 SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$second_dev"
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local

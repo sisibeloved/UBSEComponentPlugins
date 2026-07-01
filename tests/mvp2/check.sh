@@ -79,9 +79,10 @@ test "$rid" = "alloc-1"
 result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$rid")
 dev=$(printf '%s\n' "$result" | sed -n '1p')
 test "$dev" = "/dev/ssu/ssu1"
-printf '%s\n' "$result" | grep -q '^physical 0 mock-ssu0 mock-ns[0-9][0-9]* 0 4096 lba=0$'
-printf '%s\n' "$result" | grep -q '^physical 1 mock-ssu1 mock-ns[0-9][0-9]* 4096 4096 lba=0$'
-printf '%s\n' "$result" | grep -q '^physical 2 mock-ssu2 mock-ns[0-9][0-9]* 8192 4096 lba=0$'
+printf '%s\n' "$result" | grep -q '^physical_disks=3$'
+printf '%s\n' "$result" | grep -q '^physical\[0\]: ssu_id=mock-ssu0 ns_id=mock-ns[0-9][0-9]* logical_offset_bytes=0 length_bytes=4096 physical_lba_512b=0 physical_offset_bytes=0$'
+printf '%s\n' "$result" | grep -q '^physical\[1\]: ssu_id=mock-ssu1 ns_id=mock-ns[0-9][0-9]* logical_offset_bytes=4096 length_bytes=4096 physical_lba_512b=0 physical_offset_bytes=0$'
+printf '%s\n' "$result" | grep -q '^physical\[2\]: ssu_id=mock-ssu2 ns_id=mock-ns[0-9][0-9]* logical_offset_bytes=8192 length_bytes=4096 physical_lba_512b=0 physical_offset_bytes=0$'
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
 logdev_output=$(SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev)

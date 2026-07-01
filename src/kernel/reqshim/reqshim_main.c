@@ -10,7 +10,7 @@
 bool ssu_reqshim_trace_io;
 module_param_named(trace_io, ssu_reqshim_trace_io, bool, 0644);
 MODULE_PARM_DESC(trace_io,
-                 "Enable verbose ratelimited ReqShim data-plane IO logs");
+                 "Enable verbose ReqShim data-plane IO logs");
 
 static const struct file_operations ssu_reqshim_fops = {
     .owner = THIS_MODULE,

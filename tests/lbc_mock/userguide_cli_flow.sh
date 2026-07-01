@@ -114,8 +114,9 @@ rid=$(cat "$rid_file")
 result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$rid")
 dev=$(printf '%s\n' "$result" | sed -n '1p')
 test "$dev" = "/dev/ssu/demo-disk"
+printf '%s\n' "$result" | grep -q '^physical_disks=1$'
 printf '%s\n' "$result" |
-    grep -q '^physical 0 lbc-mock-ssu0 1 0 536870912 lba=0$'
+    grep -q '^physical\[0\]: ssu_id=lbc-mock-ssu0 ns_id=1 logical_offset_bytes=0 length_bytes=536870912 physical_lba_512b=0 physical_offset_bytes=0$'
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
