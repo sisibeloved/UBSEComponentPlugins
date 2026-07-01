@@ -43,7 +43,7 @@ while [ ! -p "$socket" ]; do
 done
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
-    grep -q '^lbc-mock-ssu0[[:space:]]\+lbc-mock-host0[[:space:]]\+ONLINE'
+    grep -q '^pool\[0\]: ssu_id=lbc-mock-ssu0 host_id=lbc-mock-host0 state=ONLINE '
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" alloc \
     --size 512M --stripe --share exclusive --out "$aid_file"
@@ -53,7 +53,8 @@ SSU_MGR_SOCKET="$socket" "$ubsectl" mount \
     --aid "$aid" --host local --dev /dev/ssu0
 
 dev_path=$(SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
-    awk '/^\/dev\/ssu0[[:space:]]/ { print $6; exit }')
+    sed -n 's/^logdev\[[0-9][0-9]*\]: logical_dev=\/dev\/ssu0 .* physical_dev=\([^ ]*\) .*/\1/p' |
+    sed -n '1p')
 test -n "$dev_path"
 test -e "$dev_path"
 test "$(cat "/sys/class/block/$(basename "$dev_path")/size")" = "1048576"

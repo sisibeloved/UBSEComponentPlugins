@@ -120,7 +120,7 @@ printf '%s\n' "$result" |
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
-    grep -q "^$dev[[:space:]]\\+local[[:space:]]\\+$rid[[:space:]]\\+0[[:space:]]\\+536870912[[:space:]]\\+$dev_dir/nvme1n1"
+    grep -q "^logdev\\[0\\]: logical_dev=$dev host_id=local allocate_id=$rid logical_offset_bytes=0 length_bytes=536870912 physical_dev=$dev_dir/nvme1n1 ns_id=1 physical_lba_512b=0 physical_offset_bytes=0$"
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" unmount --dev "$dev"
 SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"

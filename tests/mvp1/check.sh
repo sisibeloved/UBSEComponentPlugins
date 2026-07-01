@@ -42,5 +42,5 @@ output=$(SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool)
 printf '%s\n' "$output"
 
 printf '%s\n' "$output" | grep -q '^pool entries: 2$'
-printf '%s\n' "$output" | grep -Eq '^mock-ssu0[[:space:]]+mock-host0[[:space:]]+ONLINE[[:space:]]+0/1073741824$'
-printf '%s\n' "$output" | grep -Eq '^mock-ssu1[[:space:]]+mock-host1[[:space:]]+ONLINE[[:space:]]+0/1073741824$'
+printf '%s\n' "$output" | grep -Eq '^pool\[0\]: ssu_id=mock-ssu0 host_id=mock-host0 state=ONLINE used_bytes=0 total_bytes=1073741824 free_bytes=1073741824$'
+printf '%s\n' "$output" | grep -Eq '^pool\[1\]: ssu_id=mock-ssu1 host_id=mock-host1 state=ONLINE used_bytes=0 total_bytes=1073741824 free_bytes=1073741824$'

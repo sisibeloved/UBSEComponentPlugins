@@ -31,7 +31,8 @@ aid=$(cat "$aid_file")
 test "$aid" = "alloc-0"
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --aid "$aid" --host local --dev /dev/ssu0
-SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev | grep -q '^/dev/ssu0[[:space:]]\+local[[:space:]]\+alloc-0[[:space:]]'
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
+    grep -q '^logdev\[0\]: logical_dev=/dev/ssu0 host_id=local allocate_id=alloc-0 '
 
 if SSU_MGR_SOCKET="$socket" "$ubsectl" release --aid "$aid"; then
     echo "release while mounted should fail" >&2
@@ -39,12 +40,14 @@ if SSU_MGR_SOCKET="$socket" "$ubsectl" release --aid "$aid"; then
 fi
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" unmount --dev /dev/ssu0
-SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation | grep -q '^alloc-0[[:space:]]\+ACTIVE[[:space:]]'
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation |
+    grep -q '^allocation\[0\]: allocate_id=alloc-0 state=ACTIVE '
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --aid "$aid" --host local --dev /dev/ssu0
 SSU_MGR_SOCKET="$socket" "$ubsectl" unmount --dev /dev/ssu0
 SSU_MGR_SOCKET="$socket" "$ubsectl" release --aid "$aid"
 
-if SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation | grep -q '^alloc-0[[:space:]]'; then
+if SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation |
+    grep -q '^allocation\[[0-9][0-9]*\]: allocate_id=alloc-0 '; then
     echo "released allocation should not remain active" >&2
     exit 1
 fi
@@ -86,9 +89,9 @@ printf '%s\n' "$result" | grep -q '^physical\[2\]: ssu_id=mock-ssu2 ns_id=mock-n
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
 logdev_output=$(SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev)
-printf '%s\n' "$logdev_output" | grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]\+0[[:space:]]\+4096[[:space:]]\+/dev/nullb0"
-printf '%s\n' "$logdev_output" | grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]\+4096[[:space:]]\+4096[[:space:]]\+/dev/nullb1"
-printf '%s\n' "$logdev_output" | grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]\+8192[[:space:]]\+4096[[:space:]]\+/dev/nullb2"
+printf '%s\n' "$logdev_output" | grep -q "^logdev\\[0\\]: logical_dev=$dev host_id=local allocate_id=$rid logical_offset_bytes=0 length_bytes=4096 physical_dev=/dev/nullb0 ns_id=mock-ns[0-9][0-9]* physical_lba_512b=0 physical_offset_bytes=0$"
+printf '%s\n' "$logdev_output" | grep -q "^logdev\\[1\\]: logical_dev=$dev host_id=local allocate_id=$rid logical_offset_bytes=4096 length_bytes=4096 physical_dev=/dev/nullb1 ns_id=mock-ns[0-9][0-9]* physical_lba_512b=0 physical_offset_bytes=0$"
+printf '%s\n' "$logdev_output" | grep -q "^logdev\\[2\\]: logical_dev=$dev host_id=local allocate_id=$rid logical_offset_bytes=8192 length_bytes=4096 physical_dev=/dev/nullb2 ns_id=mock-ns[0-9][0-9]* physical_lba_512b=0 physical_offset_bytes=0$"
 
 if SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"; then
     echo "free while mounted should fail" >&2
@@ -98,7 +101,8 @@ fi
 SSU_MGR_SOCKET="$socket" "$ubsectl" unmount --dev "$dev"
 SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"
 
-if SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation | grep -q "^$rid[[:space:]]"; then
+if SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation |
+    grep -q "^allocation\\[[0-9][0-9]*\\]: allocate_id=$rid "; then
     echo "freed logical allocation should not remain active" >&2
     exit 1
 fi

@@ -306,6 +306,107 @@ static int print_manager_response(const char *response, const char *out_path)
     return 1;
 }
 
+static void print_pool_row(uint32_t index, const char *ssu_id,
+                           const char *host_id, const char *state,
+                           unsigned long long used,
+                           unsigned long long total)
+{
+    unsigned long long free_bytes = 0;
+
+    if (total >= used) {
+        free_bytes = total - used;
+    }
+
+    printf("pool[%u]: ssu_id=%s host_id=%s state=%s used_bytes=%llu total_bytes=%llu free_bytes=%llu\n",
+           index, ssu_id, host_id, state, used, total, free_bytes);
+}
+
+static void print_query_body(ssu_query_type_t type, const char *body)
+{
+    char copy[RESPONSE_SIZE];
+    char *save = NULL;
+    char *line;
+    uint32_t index = 0;
+
+    snprintf(copy, sizeof(copy), "%s", body == NULL ? "" : body);
+
+    line = strtok_r(copy, "\n", &save);
+    if (line == NULL) {
+        return;
+    }
+
+    printf("%s\n", line);
+    while ((line = strtok_r(NULL, "\n", &save)) != NULL) {
+        if (line[0] == '\0') {
+            continue;
+        }
+
+        if (type == SSU_QUERY_POOL) {
+            char ssu_id[64];
+            char host_id[64];
+            char state[16];
+            unsigned long long used = 0;
+            unsigned long long total = 0;
+
+            if (sscanf(line, "%63s %63s %15s %llu/%llu",
+                       ssu_id, host_id, state, &used, &total) == 5) {
+                print_pool_row(index++, ssu_id, host_id, state, used, total);
+                continue;
+            }
+        } else if (type == SSU_QUERY_ALLOCATION) {
+            char allocate_id[64];
+            char state[16];
+            char ssu_id[64];
+            char ns_id[32];
+            unsigned long long length = 0;
+
+            if (sscanf(line, "%63s %15s %63s %31s %llu",
+                       allocate_id, state, ssu_id, ns_id, &length) == 5) {
+                printf("allocation[%u]: allocate_id=%s state=%s ssu_id=%s ns_id=%s length_bytes=%llu\n",
+                       index++, allocate_id, state, ssu_id, ns_id, length);
+                continue;
+            }
+        } else if (type == SSU_QUERY_LOGDEV) {
+            char logical_dev[64];
+            char host_id[64];
+            char allocate_id[64];
+            char phys_dev[64];
+            char ns_id[32];
+            unsigned long long logical_offset = 0;
+            unsigned long long length = 0;
+            unsigned long long phys_sector = 0;
+            unsigned long long phys_offset = 0;
+
+            if (sscanf(line, "%63s %63s %63s %llu %llu %63s %31s %llu",
+                       logical_dev, host_id, allocate_id, &logical_offset,
+                       &length, phys_dev, ns_id, &phys_sector) == 8) {
+                phys_offset = phys_sector << 9;
+                printf("logdev[%u]: logical_dev=%s host_id=%s allocate_id=%s logical_offset_bytes=%llu length_bytes=%llu physical_dev=%s ns_id=%s physical_lba_512b=%llu physical_offset_bytes=%llu\n",
+                       index++, logical_dev, host_id, allocate_id,
+                       logical_offset, length, phys_dev, ns_id, phys_sector,
+                       phys_offset);
+                continue;
+            }
+        }
+
+        printf("%s\n", line);
+        index++;
+    }
+}
+
+static int print_query_response(ssu_query_type_t type, const char *response)
+{
+    const char *body;
+
+    if (strncmp(response, "OK\n", 3) == 0) {
+        body = response + 3;
+        print_query_body(type, body);
+        return 0;
+    }
+
+    return print_manager_response(response, NULL);
+}
+
 static int query_type_from_string(const char *s, ssu_query_type_t *out)
 {
     if (s == NULL || out == NULL) {
@@ -379,7 +480,7 @@ static int cmd_query(int argc, char **argv)
     if (!manager_request(command, response, sizeof(response))) {
         return 1;
     }
-    return print_manager_response(response, NULL);
+    return print_query_response(type, response);
 }
 
 static int cmd_list(int argc, char **argv)
@@ -424,12 +525,12 @@ static int cmd_list(int argc, char **argv)
 
     printf("pool entries: %u\n", capacity);
     for (i = 0; i < capacity; i++) {
-        printf("%s %s %s %llu/%llu\n",
-               resources[i].ssu_id,
-               resources[i].host_id,
-               resources[i].state,
-               (unsigned long long)resources[i].used_bytes,
-               (unsigned long long)resources[i].total_bytes);
+        print_pool_row(i,
+                       resources[i].ssu_id,
+                       resources[i].host_id,
+                       resources[i].state,
+                       (unsigned long long)resources[i].used_bytes,
+                       (unsigned long long)resources[i].total_bytes);
     }
 
     free(resources);

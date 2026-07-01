@@ -40,8 +40,10 @@ SSU_MGR_SOCKET="$socket" "$ubsectl" mount --aid "$aid" --host nodeB --dev /dev/s
 SSU_MGR_SOCKET="$socket" "$ssu_smoke" /dev/ssu1 --bytes 65536 --read-only
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" unmount --dev /dev/ssu1
-SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev | grep -q '^/dev/ssu0[[:space:]]\+nodeA[[:space:]]'
-if SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev | grep -q '^/dev/ssu1[[:space:]]'; then
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
+    grep -q '^logdev\[[0-9][0-9]*\]: logical_dev=/dev/ssu0 host_id=nodeA '
+if SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
+    grep -q '^logdev\[[0-9][0-9]*\]: logical_dev=/dev/ssu1 '; then
     echo "/dev/ssu1 still mounted after nodeB unmount" >&2
     exit 1
 fi
@@ -50,7 +52,8 @@ SSU_MGR_SOCKET="$socket" "$ssu_smoke" /dev/ssu0 --bytes 65536 --read-only
 SSU_MGR_SOCKET="$socket" "$ubsectl" unmount --dev /dev/ssu0
 SSU_MGR_SOCKET="$socket" "$ubsectl" release --aid "$aid"
 
-if SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation | grep -q "^$aid[[:space:]]"; then
+if SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation |
+    grep -q "^allocation\\[[0-9][0-9]*\\]: allocate_id=$aid "; then
     echo "$aid still active after release" >&2
     exit 1
 fi

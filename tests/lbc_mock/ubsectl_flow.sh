@@ -105,13 +105,13 @@ while [ ! -p "$socket" ]; do
 done
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
-    grep -q '^lbc-mock-ssu0[[:space:]]\+lbc-mock-host0[[:space:]]\+ONLINE'
+    grep -q '^pool\[0\]: ssu_id=lbc-mock-ssu0 host_id=lbc-mock-host0 state=ONLINE '
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
     grep -q '^pool entries: 3'
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
-    grep -q '^lbc-mock-ssu2[[:space:]]\+lbc-mock-host2[[:space:]]\+ONLINE'
+    grep -q '^pool\[2\]: ssu_id=lbc-mock-ssu2 host_id=lbc-mock-host2 state=ONLINE '
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
-    grep -q '^lbc-mock-ssu0[[:space:]]\+lbc-mock-host0[[:space:]]\+ONLINE[[:space:]]\+0/1073741824$'
+    grep -q '^pool\[0\]: ssu_id=lbc-mock-ssu0 host_id=lbc-mock-host0 state=ONLINE used_bytes=0 total_bytes=1073741824 free_bytes=1073741824$'
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" alloc \
     --size 768M --stripe --share exclusive --out "$aid_file"
@@ -153,7 +153,7 @@ printf '%s\n' "$result" | grep -q '^physical\[2\]: ssu_id=lbc-mock-ssu2 ns_id=3 
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
-    grep -q "^$dev[[:space:]]\+local[[:space:]]\+$rid[[:space:]]\+8192[[:space:]]\+4096[[:space:]]\+$dev_dir/nvme1n3"
+    grep -q "^logdev\\[2\\]: logical_dev=$dev host_id=local allocate_id=$rid logical_offset_bytes=8192 length_bytes=4096 physical_dev=$dev_dir/nvme1n3 ns_id=3 physical_lba_512b=0 physical_offset_bytes=0$"
 SSU_MGR_SOCKET="$socket" "$ubsectl" unmount --dev "$dev"
 SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"
 
@@ -202,7 +202,7 @@ SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
 test "$(cat "$aid_file")" = "alloc-2"
 
 alloc_rows=$(SSU_MGR_SOCKET="$socket" "$ubsectl" query --type allocation |
-    grep -c '^alloc-2[[:space:]]')
+    grep -c '^allocation\[[0-9][0-9]*\]: allocate_id=alloc-2 ')
 test "$alloc_rows" = "2"
 
 if SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
@@ -243,7 +243,7 @@ SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$second_dev"
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" mount --dev "$dev" --host local
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type logdev |
-    grep -q "^$dev[[:space:]]\\+local[[:space:]]\\+$named"
+    grep -q "^logdev\\[[0-9][0-9]*\\]: logical_dev=$dev host_id=local allocate_id=$named "
 SSU_MGR_SOCKET="$socket" "$ubsectl" unmount --dev "$dev"
 SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$dev"
 test ! -e "$dev_dir/nvme1n1"

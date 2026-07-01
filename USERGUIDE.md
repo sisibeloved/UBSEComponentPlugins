@@ -132,9 +132,9 @@ sudo ./build-lbc/tools/ubsectl list
 
 ```
 pool entries: 3
-lbc-mock-ssu0 lbc-mock-host0 ONLINE 0/<resource-bytes>
-lbc-mock-ssu1 lbc-mock-host1 ONLINE 0/<resource-bytes>
-lbc-mock-ssu2 lbc-mock-host2 ONLINE 0/<resource-bytes>
+pool[0]: ssu_id=lbc-mock-ssu0 host_id=lbc-mock-host0 state=ONLINE used_bytes=0 total_bytes=<resource-bytes> free_bytes=<resource-bytes>
+pool[1]: ssu_id=lbc-mock-ssu1 host_id=lbc-mock-host1 state=ONLINE used_bytes=0 total_bytes=<resource-bytes> free_bytes=<resource-bytes>
+pool[2]: ssu_id=lbc-mock-ssu2 host_id=lbc-mock-host2 state=ONLINE used_bytes=0 total_bytes=<resource-bytes> free_bytes=<resource-bytes>
 ```
 
 `<resource-bytes>` 是 LBC mock 暴露给 `ssu-mgr` 的每块 mock SSU 可用容量；需要固定测试容量时，在 LBC mock 配置里设置 `resource_bytes`。
@@ -221,14 +221,18 @@ sudo ./build-lbc/tools/ubsectl query --type logdev
 
 ```
 logdev entries: 1
-/dev/ssu/demo-disk local alloc-0 0 536870912 /dev/nvmeXnY 1 0
+logdev[0]: logical_dev=/dev/ssu/demo-disk host_id=local allocate_id=alloc-0 logical_offset_bytes=0 length_bytes=536870912 physical_dev=/dev/nvmeXnY ns_id=1 physical_lba_512b=0 physical_offset_bytes=0
 ```
 
 真实 `/dev` 环境下，`mount` 成功还应能看到系统块设备：
 
 ```bash
 PHYS_DEV=$(sudo ./build-lbc/tools/ubsectl query --type logdev |
-    awk -v dev="$DEV" '$1 == dev { print $6; exit }')
+    awk -v dev="$DEV" 'index($0, "logical_dev=" dev " ") {
+        for (i = 1; i <= NF; i++) if ($i ~ /^physical_dev=/) {
+            sub(/^physical_dev=/, "", $i); print $i; exit
+        }
+    }')
 
 ls -l "$DEV"
 lsblk "$DEV"
@@ -332,6 +336,22 @@ ubsectl unmount --dev /dev/ssu/ssuN|/dev/ssu/NAME
 ubsectl free    --dev /dev/ssu/ssuN|/dev/ssu/NAME
 ubsectl query   --type pool|allocation|logdev   # 查资源池/分配明细/逻辑设备映射
 ```
+
+`query` 输出字段：
+
+| 命令 | 字段 | 含义 |
+| ---- | ---- | ---- |
+| `query --type pool` | `pool[N]` | 第 N 条可分配 SSU 资源 |
+| `query --type pool` | `ssu_id` / `host_id` / `state` | SSU ID、所属 host、资源状态 |
+| `query --type pool` | `used_bytes` / `total_bytes` / `free_bytes` | 已分配容量、资源模型总容量、剩余可分配容量 |
+| `query --type allocation` | `allocation[N]` | 第 N 条物理 extent 分配记录；一个多物理盘逻辑盘会有多行 |
+| `query --type allocation` | `allocate_id` / `state` | 分配请求 ID、分配状态 |
+| `query --type allocation` | `ssu_id` / `ns_id` / `length_bytes` | 这段 extent 所在的 SSU、namespace ID、extent 长度 |
+| `query --type logdev` | `logdev[N]` | 第 N 条逻辑设备到物理设备的映射 |
+| `query --type logdev` | `logical_dev` / `host_id` / `allocate_id` | 逻辑块设备路径、挂载 host、来源分配请求 |
+| `query --type logdev` | `logical_offset_bytes` / `length_bytes` | 这段物理空间映射到逻辑盘内的起始偏移和长度 |
+| `query --type logdev` | `physical_dev` / `ns_id` | 实际承载 IO 的物理块设备、namespace ID |
+| `query --type logdev` | `physical_lba_512b` / `physical_offset_bytes` | 物理设备内的起始 LBA（512B sector）和字节偏移 |
 
 > 还有一组兼容旧命令 `alloc/mount --aid/release/query`，新集成建议用上面的 `allocate/free/query`。
 
@@ -511,9 +531,9 @@ physical[2]: ssu_id=lbc-mock-ssu2 ns_id=3 logical_offset_bytes=536870912 length_
 
 ```text
 logdev entries: 3
-/dev/ssu/ssu1 local alloc-1 0 268435456 /dev/nvmeXnY 1 0
-/dev/ssu/ssu1 local alloc-1 268435456 268435456 /dev/nvmeXnZ 2 0
-/dev/ssu/ssu1 local alloc-1 536870912 268435456 /dev/nvmeXnW 3 0
+logdev[0]: logical_dev=/dev/ssu/ssu1 host_id=local allocate_id=alloc-1 logical_offset_bytes=0 length_bytes=268435456 physical_dev=/dev/nvmeXnY ns_id=1 physical_lba_512b=0 physical_offset_bytes=0
+logdev[1]: logical_dev=/dev/ssu/ssu1 host_id=local allocate_id=alloc-1 logical_offset_bytes=268435456 length_bytes=268435456 physical_dev=/dev/nvmeXnZ ns_id=2 physical_lba_512b=0 physical_offset_bytes=0
+logdev[2]: logical_dev=/dev/ssu/ssu1 host_id=local allocate_id=alloc-1 logical_offset_bytes=536870912 length_bytes=268435456 physical_dev=/dev/nvmeXnW ns_id=3 physical_lba_512b=0 physical_offset_bytes=0
 ```
 
 这里的 `/dev/nvmeXnY` 只是占位写法，实际名称以本机输出为准。
@@ -522,7 +542,11 @@ logdev entries: 3
 
 ```bash
 PHYS=$(sudo ./build-lbc/tools/ubsectl query --type logdev |
-    awk -v dev="$DEV" '$1 == dev { sub("/dev/", "", $6); print $6 }')
+    awk -v dev="$DEV" 'index($0, "logical_dev=" dev " ") {
+        for (i = 1; i <= NF; i++) if ($i ~ /^physical_dev=/) {
+            sub(/^physical_dev=/, "", $i); sub("^/dev/", "", $i); print $i
+        }
+    }')
 
 # 先在一个终端观察底层盘；没有 iostat 时，退回容量检查
 if command -v iostat >/dev/null 2>&1; then
@@ -621,7 +645,11 @@ LBC mock 的资源池容量不再固定为 512 MiB。它会按每个物理 exten
 
 ```bash
 PHYS_DEV=$(sudo ./build-lbc/tools/ubsectl query --type logdev |
-    awk -v dev="$DEV" '$1 == dev { print $6; exit }')
+    awk -v dev="$DEV" 'index($0, "logical_dev=" dev " ") {
+        for (i = 1; i <= NF; i++) if ($i ~ /^physical_dev=/) {
+            sub(/^physical_dev=/, "", $i); print $i; exit
+        }
+    }')
 sudo blockdev --getsize64 "$DEV"
 sudo blockdev --getsz "$PHYS_DEV"
 ```
