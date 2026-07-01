@@ -199,6 +199,10 @@ static int create_fake_lbc_prefix(const char *prefix, const char *dev_dir,
                    "  nsid=$(next_nsid)\n"
                    "  : > '%s/nvme1n'\"$nsid\"\n"
                    "  mkdir -p '%s'/\"$subnqn\"/namespaces/\"$nsid\"\n"
+                   "  if [ -e '%s/fail-create-after-side-effects' ]; then\n"
+                   "    rm -f '%s/fail-create-after-side-effects'\n"
+                   "    exit 1\n"
+                   "  fi\n"
                    "elif [ \"$sample\" = './sample_detach_delete' ]; then\n"
                    "  rm -f \"$devpath\"\n"
                    "  rm -rf '%s'/\"$subnqn\"/namespaces/\"$nsid\"\n"
@@ -206,7 +210,7 @@ static int create_fake_lbc_prefix(const char *prefix, const char *dev_dir,
                    "  exit 2\n"
                    "fi\n",
                    dev_dir, log_path, dev_dir, configfs_dir,
-                   configfs_dir) != 0) {
+                   dev_dir, dev_dir, configfs_dir) != 0) {
         return 1;
     }
 
@@ -229,8 +233,11 @@ static int run_plugin_flow(const char *prefix, const char *dev_dir,
     uint32_t resource_count = 3;
     ssu_extent_create_req_t req = {};
     char ns_id[32];
+    char recovered_ns_id[32];
     char dev_path[128];
     char expected_dev[512];
+    char expected_recovered_dev[512];
+    char failure_marker[512];
 
     bad_config.prefix = prefix;
     bad_config.dev_ip = "127.0.0.1";
@@ -305,6 +312,42 @@ static int run_plugin_flow(const char *prefix, const char *dev_dir,
     snprintf(expected_dev, sizeof(expected_dev), "%s/nvme1n1", dev_dir);
     if (strcmp(dev_path, expected_dev) != 0 || !path_exists(expected_dev)) {
         fprintf(stderr, "expected %s, got %s\n", expected_dev, dev_path);
+        return 1;
+    }
+
+    snprintf(failure_marker, sizeof(failure_marker),
+             "%s/fail-create-after-side-effects", dev_dir);
+    if (write_file(failure_marker, 0600, "1\n") != 0) {
+        return 1;
+    }
+
+    req.ssu_id = resources[1].ssu_id;
+    req.logical_offset = req.length;
+    memset(recovered_ns_id, 0, sizeof(recovered_ns_id));
+    if (expect_err("recover create after script side effects",
+                   plugin->create_ns(&req, recovered_ns_id,
+                                     sizeof(recovered_ns_id), &phys_sector),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    snprintf(expected_recovered_dev, sizeof(expected_recovered_dev),
+             "%s/nvme1n2", dev_dir);
+    if (strcmp(recovered_ns_id, "2") != 0 ||
+        !path_exists(expected_recovered_dev)) {
+        fprintf(stderr, "expected recovered ns 2 at %s, got ns=%s\n",
+                expected_recovered_dev, recovered_ns_id);
+        return 1;
+    }
+
+    if (expect_err("delete recovered ns",
+                   plugin->delete_ns(resources[1].ssu_id, recovered_ns_id),
+                   SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (path_exists(expected_recovered_dev)) {
+        fputs("recovered namespace should be deleted cleanly\n", stderr);
         return 1;
     }
 

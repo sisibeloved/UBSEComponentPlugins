@@ -5,6 +5,7 @@
 #include <dirent.h>
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -629,6 +630,127 @@ static int choose_created_nsid(const std::set<std::string> &before,
     return 0;
 }
 
+static int read_first_line(const char *path, char *out, size_t n)
+{
+    FILE *fp;
+
+    if (path == NULL || out == NULL || n == 0) {
+        return 0;
+    }
+
+    fp = fopen(path, "r");
+    if (fp == NULL) {
+        return 0;
+    }
+
+    if (fgets(out, n, fp) == NULL) {
+        fclose(fp);
+        return 0;
+    }
+
+    fclose(fp);
+    trim_ascii_space(out);
+    return 1;
+}
+
+static int write_text_file(const char *path, const char *value)
+{
+    int fd;
+    size_t len;
+    ssize_t written;
+
+    if (is_empty_string(path) || value == NULL) {
+        return 0;
+    }
+
+    fd = open(path, O_WRONLY);
+    if (fd < 0) {
+        return 0;
+    }
+
+    len = strlen(value);
+    written = write(fd, value, len);
+    close(fd);
+    return written == (ssize_t)len;
+}
+
+static void rescan_connected_controllers(void)
+{
+    const char sysfs_nvme[] = "/sys/class/nvme";
+    DIR *dir;
+    struct dirent *entry;
+    int matched = 0;
+
+    dir = opendir(sysfs_nvme);
+    if (dir == NULL) {
+        lbc_mock_log("controller rescan skipped: cannot open %s errno=%d",
+                     sysfs_nvme, errno);
+        return;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        char ctrl_path[512];
+        char nqn_path[512];
+        char rescan_path[512];
+        char nqn[128];
+
+        if (strncmp(entry->d_name, "nvme", 4) != 0) {
+            continue;
+        }
+
+        if (!checked_join(ctrl_path, sizeof(ctrl_path), sysfs_nvme,
+                          entry->d_name) ||
+            !checked_join(nqn_path, sizeof(nqn_path), ctrl_path,
+                          "subsysnqn") ||
+            !read_first_line(nqn_path, nqn, sizeof(nqn)) ||
+            strcmp(nqn, lbc_config.subnqn) != 0) {
+            continue;
+        }
+
+        matched = 1;
+        if (!checked_join(rescan_path, sizeof(rescan_path), ctrl_path,
+                          "rescan_controller") ||
+            !write_text_file(rescan_path, "1\n")) {
+            lbc_mock_log("controller rescan failed ctrl=%s errno=%d",
+                         ctrl_path, errno);
+            continue;
+        }
+
+        lbc_mock_log("controller rescan success ctrl=%s subnqn=%s",
+                     ctrl_path, lbc_config.subnqn);
+    }
+
+    closedir(dir);
+    if (!matched) {
+        lbc_mock_log("controller rescan skipped: no connected controller for subnqn=%s",
+                     lbc_config.subnqn);
+    }
+}
+
+static void cleanup_configfs_namespace_id(const char *ns_id)
+{
+    char ns_root[512];
+    char ns_path[512];
+    char enable_path[512];
+
+    if (is_empty_string(ns_id) ||
+        !namespace_root_path(ns_root, sizeof(ns_root)) ||
+        !checked_join(ns_path, sizeof(ns_path), ns_root, ns_id)) {
+        return;
+    }
+
+    if (checked_join(enable_path, sizeof(enable_path), ns_path, "enable")) {
+        write_text_file(enable_path, "0\n");
+    }
+
+    if (rmdir(ns_path) == 0) {
+        lbc_mock_log("cleaned orphan configfs namespace ns_id=%s", ns_id);
+    } else {
+        lbc_mock_log("cleanup orphan configfs namespace failed ns_id=%s path=%s errno=%d",
+                     ns_id, ns_path, errno);
+    }
+}
+
 static int parse_nsid_from_dev_path(const char *dev_path, char *out_ns_id,
                                     size_t n)
 {
@@ -991,6 +1113,8 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
     ssu_err_t err;
     uint32_t i;
     uint64_t nsze_value;
+    int ns_id_known = 0;
+    int command_failed_after_create = 0;
 
     ensure_config_loaded();
 
@@ -1067,9 +1191,17 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
     snprintf(nsze, sizeof(nsze), "%llu", (unsigned long long)nsze_value);
     err = run_command_in_prefix(argv);
     if (err != SSU_OK) {
-        lbc_mock_log("create_ns failed: create_attach command failed allocate_id=%s err=%d",
-                     extent_req->allocate_id, err);
-        return err;
+        if (!choose_created_nsid(ns_before, ns_id, sizeof(ns_id))) {
+            lbc_mock_log("create_ns failed: create_attach command failed allocate_id=%s err=%d",
+                         extent_req->allocate_id, err);
+            return err;
+        }
+
+        ns_id_known = 1;
+        command_failed_after_create = 1;
+        lbc_mock_log("create_attach command failed after namespace appeared allocate_id=%s ns_id=%s err=%d; rescanning controller",
+                     extent_req->allocate_id, ns_id, err);
+        rescan_connected_controllers();
     }
 
     memset(dev_path, 0, sizeof(dev_path));
@@ -1078,10 +1210,15 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
         lbc_mock_log("create_attach completed but no new NVMe namespace was found: dev_dir=%s before=%zu after=%zu nsze=%s subnqn=%s",
                      lbc_config.dev_dir, before.size(), after.size(), nsze,
                      lbc_config.subnqn);
+        if (command_failed_after_create) {
+            cleanup_configfs_namespace_id(ns_id);
+            return err;
+        }
         return SSU_ERR_NOT_FOUND;
     }
 
-    if (!choose_created_nsid(ns_before, ns_id, sizeof(ns_id))) {
+    if (!ns_id_known &&
+        !choose_created_nsid(ns_before, ns_id, sizeof(ns_id))) {
         if (parse_nsid_from_dev_path(dev_path, ns_id, sizeof(ns_id))) {
             lbc_mock_log("create_ns warning: configfs nsid not found; inferred ns_id=%s from dev_path=%s",
                          ns_id, dev_path);
@@ -1090,6 +1227,11 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
             lbc_mock_log("create_ns warning: cannot determine actual nsid; using fallback ns_id=%s dev_path=%s",
                          ns_id, dev_path);
         }
+    }
+
+    if (command_failed_after_create) {
+        lbc_mock_log("create_attach recovered after command failure allocate_id=%s ns_id=%s dev_path=%s",
+                     extent_req->allocate_id, ns_id, dev_path);
     }
 
     memset(slot, 0, sizeof(*slot));
