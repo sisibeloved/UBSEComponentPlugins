@@ -1246,12 +1246,12 @@ static ssu_err_t lbc_mock_create_ns(const ssu_extent_create_req_t *extent_req,
     slot->phys_sector = 0;
 
     copy_cstr(out_ns_id, n, ns_id);
-    *out_phys_sector = extent_req->phys_offset_hint;
+    *out_phys_sector = slot->phys_sector;
     advance_next_nsid_hint(ns_id);
     lbc_mock_log("create_ns success allocate_id=%s ns_id=%s dev_path=%s length=%llu lba=%llu nsze=%llu",
                  extent_req->allocate_id, ns_id, dev_path,
                  (unsigned long long)extent_req->length,
-                 (unsigned long long)extent_req->phys_offset_hint,
+                 (unsigned long long)slot->phys_sector,
                  (unsigned long long)nsze_value);
     return SSU_OK;
 }

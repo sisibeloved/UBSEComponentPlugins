@@ -841,6 +841,9 @@ int main(int argc, char **argv)
 
     signal(SIGINT, handle_signal);
     signal(SIGTERM, handle_signal);
+#ifdef SIGPIPE
+    signal(SIGPIPE, SIG_IGN);
+#endif
 
     if (opts.socket_path == NULL && !opts.once &&
         strcmp(opts.role, "manager") == 0) {

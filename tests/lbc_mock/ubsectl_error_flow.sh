@@ -83,3 +83,62 @@ printf '%s\n' "$output" | grep -q 'no new /dev/nvmeXnY namespace was found'
 grep -q 'create_ns start allocate_id=alloc-0' "$log_file"
 grep -q 'target ready subnqn=nqn.2025-01.io.ssu:m0 port=4420' "$log_file"
 grep -q 'create_attach completed but no new NVMe namespace was found' "$log_file"
+
+cat > "$prefix/mock/run_mock.sh" <<EOF
+#!/bin/sh
+set -eu
+sample=\$1
+shift
+subnqn=
+nsid=
+nsze=
+devpath=
+next_nsid() {
+    i=1
+    while [ -e "$dev_dir/nvme1n\$i" ]; do
+        i=\$((i + 1))
+    done
+    printf '%s\n' "\$i"
+}
+echo slow-run "\$sample" "\$@" >> "$log_file"
+while [ "\$#" -gt 0 ]; do
+    case "\$1" in
+        --sub-nqn) subnqn=\$2; shift 2 ;;
+        --nsid) nsid=\$2; shift 2 ;;
+        --nsze) nsze=\$2; shift 2 ;;
+        --dev-path) devpath=\$2; shift 2 ;;
+        --dev-ip|--port) shift 2 ;;
+        *) shift ;;
+    esac
+done
+
+if [ "\$sample" = "./sample_create_attach" ]; then
+    sleep 1
+    nsid=\$(next_nsid)
+    : > "$dev_dir/nvme1n\$nsid"
+    mkdir -p "$configfs_dir/\$subnqn/namespaces/\$nsid"
+elif [ "\$sample" = "./sample_detach_delete" ]; then
+    rm -f "\$devpath"
+    rmdir "$configfs_dir/\$subnqn/namespaces/\$nsid"
+else
+    exit 2
+fi
+EOF
+chmod +x "$prefix/mock/run_mock.sh"
+
+set +e
+timeout_output=$(UBSE_SSU_SDK_RESPONSE_TIMEOUT_MS=100 \
+    SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
+    --size 512M --name slow-timeout --physical-disks 1 2>&1)
+timeout_rc=$?
+set -e
+
+if [ "$timeout_rc" -eq 0 ]; then
+    echo "slow allocate unexpectedly succeeded" >&2
+    exit 1
+fi
+
+printf '%s\n' "$timeout_output" | grep -q 'allocate failed: SSU_ERR_IO (-5)'
+sleep 2
+kill -0 "$mgr_pid"
+SSU_MGR_SOCKET="$socket" "$ubsectl" list >/dev/null

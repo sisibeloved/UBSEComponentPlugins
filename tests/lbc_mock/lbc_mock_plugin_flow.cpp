@@ -296,7 +296,7 @@ static int run_plugin_flow(const char *prefix, const char *dev_dir,
         return 1;
     }
 
-    if (strcmp(ns_id, "1") != 0 || phys_sector != 128) {
+    if (strcmp(ns_id, "1") != 0 || phys_sector != 0) {
         fputs("create_ns returned unexpected ns metadata\n", stderr);
         return 1;
     }
@@ -433,6 +433,12 @@ static int run_real_plugin_flow(const char *prefix)
                    plugin->create_ns(&req, ns_id, sizeof(ns_id),
                                      &phys_sector),
                    SSU_OK) != 0) {
+        return 1;
+    }
+
+    if (phys_sector != 0) {
+        fputs("real create_ns returned unexpected namespace-local LBA\n",
+              stderr);
         return 1;
     }
 

@@ -21,7 +21,7 @@ cat > "$config_file" <<EOF
 dev_dir=$dev_dir
 configfs_dir=$configfs_dir
 log_file=$log_file
-resource_bytes=1073741824
+resource_bytes=17179869184
 EOF
 
 test ! -e "$prefix/mock/ssu_lbc_mock.conf"
@@ -111,7 +111,7 @@ SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
     grep -q '^pool\[2\]: ssu_id=lbc-mock-ssu2 host_id=lbc-mock-host2 state=ONLINE '
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
-    grep -q '^pool\[0\]: ssu_id=lbc-mock-ssu0 host_id=lbc-mock-host0 state=ONLINE used_bytes=0 total_bytes=1073741824 free_bytes=1073741824$'
+    grep -q '^pool\[0\]: ssu_id=lbc-mock-ssu0 host_id=lbc-mock-host0 state=ONLINE used_bytes=0 total_bytes=17179869184 free_bytes=17179869184$'
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" alloc \
     --size 768M --stripe --share exclusive --out "$aid_file"
@@ -236,8 +236,8 @@ test "$second_named" = "alloc-3"
 second_result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$second_named")
 second_dev=$(printf '%s\n' "$second_result" | sed -n '1p')
 test "$second_dev" = "/dev/ssu/data-b"
-printf '%s\n' "$second_result" | grep -Eq '^physical\[0\]: ssu_id=lbc-mock-ssu0 ns_id=[0-9]+ logical_offset_bytes=0 length_bytes=4096 physical_lba_512b=8 physical_offset_bytes=4096$'
-printf '%s\n' "$second_result" | grep -Eq '^physical\[1\]: ssu_id=lbc-mock-ssu1 ns_id=[0-9]+ logical_offset_bytes=4096 length_bytes=4096 physical_lba_512b=8 physical_offset_bytes=4096$'
+printf '%s\n' "$second_result" | grep -Eq '^physical\[0\]: ssu_id=lbc-mock-ssu0 ns_id=[0-9]+ logical_offset_bytes=0 length_bytes=4096 physical_lba_512b=0 physical_offset_bytes=0$'
+printf '%s\n' "$second_result" | grep -Eq '^physical\[1\]: ssu_id=lbc-mock-ssu1 ns_id=[0-9]+ logical_offset_bytes=4096 length_bytes=4096 physical_lba_512b=0 physical_offset_bytes=0$'
 printf '%s\n' "$second_result" | grep -Eq '^physical\[2\]: ssu_id=lbc-mock-ssu2 ns_id=[0-9]+ logical_offset_bytes=8192 length_bytes=4096 physical_lba_512b=0 physical_offset_bytes=0$'
 SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$second_dev"
 
@@ -251,3 +251,40 @@ test ! -e "$dev_dir/nvme1n2"
 test ! -e "$dev_dir/nvme1n3"
 test ! -e "$dev_dir/nvme1n4"
 test ! -e "$dev_dir/nvme1n5"
+
+g16_devs="$root/g16_devs"
+: > "$g16_devs"
+for n in $(seq 1 16); do
+    name=$(printf '/dev/ssu/g16_%02d' "$n")
+    SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
+        --size 1G \
+        --name "$name" \
+        --physical-disks 1 \
+        --out "$aid_file"
+    rid=$(cat "$aid_file")
+    result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$rid")
+    g16_dev=$(printf '%s\n' "$result" | sed -n '1p')
+    test "$g16_dev" = "$name"
+    printf '%s\n' "$result" |
+        grep -Eq '^physical\[0\]: ssu_id=lbc-mock-ssu0 ns_id=[0-9]+ logical_offset_bytes=0 length_bytes=1073741824 physical_lba_512b=0 physical_offset_bytes=0$'
+    printf '%s\n' "$g16_dev" >> "$g16_devs"
+done
+
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
+    grep -q '^pool\[0\]: ssu_id=lbc-mock-ssu0 host_id=lbc-mock-host0 state=ONLINE used_bytes=17179869184 total_bytes=17179869184 free_bytes=0$'
+
+if SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
+    --size 1G \
+    --name /dev/ssu/g16_17 \
+    --physical-disks 1 \
+    > "$root/g16_17.out" 2> "$root/g16_17.err"; then
+    echo "expected 17th 1G allocation to fail" >&2
+    exit 1
+fi
+grep -q 'SSU_ERR_NO_RESOURCE' "$root/g16_17.err"
+
+while IFS= read -r g16_dev; do
+    SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$g16_dev"
+done < "$g16_devs"
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
+    grep -q '^pool\[0\]: ssu_id=lbc-mock-ssu0 host_id=lbc-mock-host0 state=ONLINE used_bytes=0 total_bytes=17179869184 free_bytes=17179869184$'

@@ -9,7 +9,7 @@ extern "C" {
 
 #define UBSE_SSU_SDK_DEFAULT_SOCKET "/tmp/ubse-ssu-mgr.fifo"
 #define UBSE_SSU_SDK_DEFAULT_LOG "/tmp/ubse-ssu-sdk.log"
-#define UBSE_SSU_SDK_DEFAULT_RESPONSE_TIMEOUT_MS 5000U
+#define UBSE_SSU_SDK_DEFAULT_RESPONSE_TIMEOUT_MS 120000U
 
 typedef struct {
     /* Set to sizeof(ubse_ssu_sdk_init_options_t). */
