@@ -35,6 +35,18 @@ control_multiphys = executable(
 
 test('control_multiphys', control_multiphys)
 
+control_rank_distribution = executable(
+  'control_rank_distribution',
+  sources: ['control_rank_distribution.cpp'],
+  include_directories: inc,
+  dependencies: [
+    ssu_controller_dep,
+  ],
+  link_with: libssu_plugin_mock,
+)
+
+test('control_rank_distribution', control_rank_distribution)
+
 control_stale_logdev = executable(
   'control_stale_logdev',
   sources: ['control_stale_logdev.cpp'],

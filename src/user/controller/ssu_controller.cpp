@@ -92,6 +92,71 @@ static uint32_t online_pool_indexes(uint32_t *indexes)
     return count;
 }
 
+static int pool_index_already_selected(const uint32_t *indexes,
+                                       uint32_t count, uint32_t index)
+{
+    uint32_t i;
+
+    for (i = 0; i < count; i++) {
+        if (indexes[i] == index) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int pool_index_has_capacity(uint32_t pool_index, uint64_t length)
+{
+    if (pool_index >= pool_count ||
+        pool[pool_index].used_bytes > pool[pool_index].total_bytes ||
+        pool[pool_index].used_bytes % SSU_CONTROLLER_SECTOR_SIZE != 0) {
+        return 0;
+    }
+
+    return length <= pool[pool_index].total_bytes -
+                         pool[pool_index].used_bytes;
+}
+
+static ssu_err_t select_pool_indexes(uint32_t *online_indexes,
+                                     uint32_t online_count,
+                                     uint32_t extent_count,
+                                     uint64_t base_length,
+                                     uint64_t remainder,
+                                     uint32_t *selected_indexes)
+{
+    uint32_t i;
+
+    for (i = 0; i < extent_count; i++) {
+        uint64_t length = base_length + (i < remainder ? 1ULL : 0ULL);
+        uint32_t j;
+        int found = 0;
+
+        for (j = 0; j < online_count; j++) {
+            uint32_t pool_index = online_indexes[j];
+
+            if (pool_index_already_selected(selected_indexes, i,
+                                            pool_index)) {
+                continue;
+            }
+
+            if (!pool_index_has_capacity(pool_index, length)) {
+                continue;
+            }
+
+            selected_indexes[i] = pool_index;
+            found = 1;
+            break;
+        }
+
+        if (!found) {
+            return SSU_ERR_NO_RESOURCE;
+        }
+    }
+
+    return SSU_OK;
+}
+
 static uint32_t active_allocation_extent_count(const char *allocate_id)
 {
     uint32_t count = 0;
@@ -592,9 +657,11 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
     controller_allocation_t *created_slots[SSU_CONTROLLER_MAX_ALLOCATIONS];
     ssu_extent_create_req_t extent_req;
     uint32_t pool_indexes[SSU_CONTROLLER_MAX_RESOURCES];
+    uint32_t selected_pool_indexes[SSU_CONTROLLER_MAX_RESOURCES];
     char allocate_id[64];
     char ns_id[32];
     uint32_t extent_count;
+    uint32_t online_count;
     uint64_t logical_offset = 0;
     uint64_t base_length;
     uint64_t remainder;
@@ -637,13 +704,15 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
 
     next_auto_allocate_id(allocate_id, sizeof(allocate_id));
 
-    extent_count = online_pool_indexes(pool_indexes);
-    if (extent_count == 0) {
+    online_count = online_pool_indexes(pool_indexes);
+    if (online_count == 0) {
         return SSU_ERR_NO_RESOURCE;
     }
 
+    extent_count = online_count;
+
     if (req->physical_disk_count > 0) {
-        if (req->physical_disk_count > extent_count) {
+        if (req->physical_disk_count > online_count) {
             return SSU_ERR_NO_RESOURCE;
         }
         extent_count = req->physical_disk_count;
@@ -665,12 +734,19 @@ ssu_err_t ssu_controller_alloc(const ssu_plugin_ops_t *plugin,
     memset(out, 0, sizeof(*out));
     memset(out_extents, 0, sizeof(out_extents[0]) * extent_count);
     memset(created_slots, 0, sizeof(created_slots));
+    memset(selected_pool_indexes, 0, sizeof(selected_pool_indexes));
 
     base_length = req->size_bytes / extent_count;
     remainder = req->size_bytes % extent_count;
+    err = select_pool_indexes(pool_indexes, online_count, extent_count,
+                              base_length, remainder, selected_pool_indexes);
+    if (err != SSU_OK) {
+        return err;
+    }
+
     for (i = 0; i < extent_count; i++) {
         controller_allocation_t *slot = next_free_allocation_slot();
-        uint32_t pool_index = pool_indexes[i];
+        uint32_t pool_index = selected_pool_indexes[i];
         uint64_t length = base_length + (i < remainder ? 1ULL : 0ULL);
         uint64_t phys_sector = 0;
 

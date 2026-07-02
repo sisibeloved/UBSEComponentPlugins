@@ -252,10 +252,10 @@ test ! -e "$dev_dir/nvme1n3"
 test ! -e "$dev_dir/nvme1n4"
 test ! -e "$dev_dir/nvme1n5"
 
-g16_devs="$root/g16_devs"
-: > "$g16_devs"
-for n in $(seq 1 16); do
-    name=$(printf '/dev/ssu/g16_%02d' "$n")
+g20_devs="$root/g20_devs"
+: > "$g20_devs"
+for n in $(seq 1 20); do
+    name=$(printf '/dev/ssu/g20_%02d' "$n")
     SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
         --size 1G \
         --name "$name" \
@@ -263,28 +263,27 @@ for n in $(seq 1 16); do
         --out "$aid_file"
     rid=$(cat "$aid_file")
     result=$(SSU_MGR_SOCKET="$socket" "$ubsectl" allocate-result-get --request-id "$rid")
-    g16_dev=$(printf '%s\n' "$result" | sed -n '1p')
-    test "$g16_dev" = "$name"
+    g20_dev=$(printf '%s\n' "$result" | sed -n '1p')
+    test "$g20_dev" = "$name"
+    if [ "$n" -le 16 ]; then
+        expected_ssu=lbc-mock-ssu0
+    else
+        expected_ssu=lbc-mock-ssu1
+    fi
     printf '%s\n' "$result" |
-        grep -Eq '^physical\[0\]: ssu_id=lbc-mock-ssu0 ns_id=[0-9]+ logical_offset_bytes=0 length_bytes=1073741824 physical_lba_512b=0 physical_offset_bytes=0$'
-    printf '%s\n' "$g16_dev" >> "$g16_devs"
+        grep -Eq "^physical\\[0\\]: ssu_id=$expected_ssu ns_id=[0-9]+ logical_offset_bytes=0 length_bytes=1073741824 physical_lba_512b=0 physical_offset_bytes=0$"
+    printf '%s\n' "$g20_dev" >> "$g20_devs"
 done
 
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
     grep -q '^pool\[0\]: ssu_id=lbc-mock-ssu0 host_id=lbc-mock-host0 state=ONLINE used_bytes=17179869184 total_bytes=17179869184 free_bytes=0$'
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
+    grep -q '^pool\[1\]: ssu_id=lbc-mock-ssu1 host_id=lbc-mock-host1 state=ONLINE used_bytes=4294967296 total_bytes=17179869184 free_bytes=12884901888$'
 
-if SSU_MGR_SOCKET="$socket" "$ubsectl" allocate \
-    --size 1G \
-    --name /dev/ssu/g16_17 \
-    --physical-disks 1 \
-    > "$root/g16_17.out" 2> "$root/g16_17.err"; then
-    echo "expected 17th 1G allocation to fail" >&2
-    exit 1
-fi
-grep -q 'SSU_ERR_NO_RESOURCE' "$root/g16_17.err"
-
-while IFS= read -r g16_dev; do
-    SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$g16_dev"
-done < "$g16_devs"
+while IFS= read -r g20_dev; do
+    SSU_MGR_SOCKET="$socket" "$ubsectl" free --dev "$g20_dev"
+done < "$g20_devs"
 SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
     grep -q '^pool\[0\]: ssu_id=lbc-mock-ssu0 host_id=lbc-mock-host0 state=ONLINE used_bytes=0 total_bytes=17179869184 free_bytes=17179869184$'
+SSU_MGR_SOCKET="$socket" "$ubsectl" query --type pool |
+    grep -q '^pool\[1\]: ssu_id=lbc-mock-ssu1 host_id=lbc-mock-host1 state=ONLINE used_bytes=0 total_bytes=17179869184 free_bytes=17179869184$'
