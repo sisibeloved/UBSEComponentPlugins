@@ -31,7 +31,7 @@
 | 依赖 | 说明 |
 | ---- | ---- |
 | 本组件构建产物 | `ssu-mgr`（常驻控制面进程）、`ubsectl`（CLI）、`libubse_ssu_sdk.so` + `ubse_ssu_sdk.h`（上游 SDK） |
-| LBC mock 后端 | 模拟 SSU 硬件的脚本套件，放在某个目录（下文记作 `$LBC_PREFIX`） |
+| LBC mock 后端 | 模拟 SSU 硬件的脚本套件，放在某个目录（下文记作 `$LBC_PREFIX`）。本仓库已自带一套最小可用 mock，本仓库根目录可以直接作为 `$LBC_PREFIX` |
 | 内核头（可选） | 若要真正读写 `/dev/ssu/*` 逻辑块设备，需要构建并加载 `ssu_reqshim.ko` 内核模块 |
 
 `$LBC_PREFIX` 至少要包含这些文件：
@@ -47,6 +47,15 @@ $LBC_PREFIX/
 
 本组件会自己调用这些脚本。集成方平时只调用 `ubsectl` 或 SDK，不直接调 LBC mock 脚本。
 
+如果使用本仓库自带的 mock，直接让 `$LBC_PREFIX` 指向本仓库根目录：
+
+```bash
+cd /path/to/UBSEComponentPlugins
+export LBC_PREFIX="$PWD"
+```
+
+这套 mock 会通过 nvmet configfs 创建 NVMe-oF target，通过 sparse backing img + loop 设备提供 namespace，再让 host 侧出现 `/dev/nvmeXnY`。默认状态目录是 `/run/ubse-lbc-mock`，默认 backing 目录是 `/var/lib/ubse-lbc-mock`；需要隔离测试目录时可以设置 `UBSE_LBC_MOCK_STATE_DIR`、`UBSE_LBC_MOCK_BACKING_DIR` 和 `UBSE_LBC_MOCK_LOG`。
+
 先做一次前置检查，避免把旧测试目录或空目录当成 LBC mock：
 
 ```bash
@@ -61,8 +70,8 @@ test -e "$LBC_PREFIX/sample_detach_delete"
 ### 2.2 构建
 
 ```bash
-# 指向 LBC mock 后端目录
-export LBC_PREFIX=/path/to/lbc/mock/prefix
+# 指向 LBC mock 后端目录；使用本仓库自带 mock 时可以写成本仓库根目录
+export LBC_PREFIX=/path/to/UBSEComponentPlugins
 
 # 用户态（必选）
 meson setup build-lbc -Dvendor=lbc_mock

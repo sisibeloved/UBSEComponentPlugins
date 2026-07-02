@@ -91,4 +91,13 @@ if get_option('vendor') == 'lbc_mock'
     depends: [ubsectl, ssu_mgr],
     timeout: 20,
   )
+
+  lbc_mock_self_hosted_contract = find_program('self_hosted_mock_contract.sh')
+
+  test(
+    'lbc_mock_self_hosted_contract',
+    lbc_mock_self_hosted_contract,
+    args: [meson.project_source_root()],
+    timeout: 20,
+  )
 endif
